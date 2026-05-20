@@ -1,0 +1,36 @@
+{
+  "name": "ArduinoDroneCAN",
+  "version": "1.0.0",
+  "description": "DroneCAN library for Arduino on STM32 (Beyond Robotix). Bundles the BR wrapper, generated DSDL message types, libcanard, and acanfd-stm32 in a single library.",
+  "keywords": "dronecan, can, canbus, canfd, stm32, arduino, uavcan, beyondrobotix",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BeyondRobotix/libArduinoDroneCAN.git"
+  },
+  "authors": [
+    {
+      "name": "Beyond Robotix",
+      "email": "admin@beyondrobotix.com",
+      "url": "https://www.beyondrobotix.com",
+      "maintainer": true
+    }
+  ],
+  "license": "MIT",
+  "frameworks": "arduino",
+  "platforms": "ststm32",
+  "build": {
+    "srcDir": ".",
+    "srcFilter": [
+      "+<src/>",
+      "+<dronecan/src/>",
+      "+<libcanard/>",
+      "+<acanfd-stm32/src/>"
+    ],
+    "flags": [
+      "-I src",
+      "-I dronecan/include",
+      "-I libcanard",
+      "-I acanfd-stm32/src"
+    ]
+  }
+}
