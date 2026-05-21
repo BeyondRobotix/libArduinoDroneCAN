@@ -1,7 +1,21 @@
 #include <dronecan_msgs.h>
 
+// Forward-declared so the DroneCAN& overload below can call canfd_default();
+// the full definition arrives later in dronecan.h, well before any template
+// instantiation in user TUs.
+class DroneCAN;
+
 template <typename Msg>
 struct UavcanTraits; // no definition
+
+// Expands to a comma-prefixed `, tao` only when the dsdlc-generated encoders
+// took the trailing tao argument (i.e. when libcanard auto-enables the TAO
+// option alongside CANFD support). Otherwise empty.
+#if CANARD_ENABLE_TAO_OPTION
+    #define CANARD_TAO_ENCODE_ARG(tao) , tao
+#else
+    #define CANARD_TAO_ENCODE_ARG(tao)
+#endif
 
 #define REGISTER_UAVCAN_TYPE(MSGTYPE, ENCFUNC, ID_MACRO, SIG_MACRO, MAXSZ_MACRO) \
     template <>                                                                  \
@@ -11,40 +25,64 @@ struct UavcanTraits; // no definition
         static constexpr uint64_t signature = SIG_MACRO;                         \
         static constexpr size_t max_size = MAXSZ_MACRO;                          \
                                                                                  \
-        static uint32_t encode(MSGTYPE &m, uint8_t *buf)                         \
+        static uint32_t encode(MSGTYPE &m, uint8_t *buf, bool tao = true)        \
         {                                                                        \
-            return ENCFUNC(&m, buf);                                             \
+            (void)tao;                                                           \
+            return ENCFUNC(&m, buf                                               \
+                CANARD_TAO_ENCODE_ARG(tao)                                       \
+            );                                                                   \
         }                                                                        \
     };
 
 /*
 This only works for *some* dronecan messages. Most of the sensors/equipment type messages.
+
+The optional trailing `canfd` flag selects per-frame wire format on FD-capable
+builds (CoreNode / MicroNodePlus with -DCANARD_ENABLE_CANFD=1). On classic
+builds it is compiled out. Defaults to false so existing callers are unchanged.
 */
 template<typename Msg>
 void sendUavcanMsg(CanardInstance &ins,
                    Msg           &pkt,
-                   uint8_t        priority = CANARD_TRANSFER_PRIORITY_LOW)
+                   uint8_t        priority = CANARD_TRANSFER_PRIORITY_LOW,
+                   bool           canfd    = false)
 {
     // per‐message‐type transfer counter
     static uint8_t transfer_id = 0;
 
     uint8_t buffer[ UavcanTraits<Msg>::max_size ];
-    uint32_t len = UavcanTraits<Msg>::encode(pkt, buffer);
-    canardBroadcast(&ins,
-                    UavcanTraits<Msg>::signature,
-                    UavcanTraits<Msg>::message_id,
-                    &transfer_id,
-                    priority,
-                    buffer,
-                    len
+    // TAO (tail-array optimisation) must be disabled on CANFD frames per DroneCAN spec.
+    uint32_t len = UavcanTraits<Msg>::encode(pkt, buffer, /*tao=*/!canfd);
+    CanardTxTransfer transfer_object = {
+        .transfer_type = CanardTransferTypeBroadcast,
+        .data_type_signature = UavcanTraits<Msg>::signature,
+        .data_type_id = UavcanTraits<Msg>::message_id,
+        .inout_transfer_id = &transfer_id,
+        .priority = priority,
+        .payload = buffer,
+        .payload_len = (uint16_t)len,
 #if CANARD_ENABLE_CANFD
-                        ,true                      ///< Is the frame canfd
+        .canfd = canfd,
 #endif
-                );
+    };
+#if !CANARD_ENABLE_CANFD
+    (void)canfd;
+#endif
+    canardBroadcastObj(&ins, &transfer_object);
 
     // advance for next time (wraps 0→255→0 automatically)
     ++transfer_id;
 }
+
+/*
+DroneCAN&-taking overload: routes the per-frame canfd flag through the node's
+configured default (set by DroneCAN::init(..., CanMode::FD)). Pass an explicit
+override if you want to force one message to a different format.
+*/
+template<typename Msg>
+void sendUavcanMsg(DroneCAN      &dronecan,
+                   Msg           &pkt,
+                   uint8_t        priority = CANARD_TRANSFER_PRIORITY_LOW);
 
 REGISTER_UAVCAN_TYPE(dronecan_sensors_hygrometer_Hygrometer, dronecan_sensors_hygrometer_Hygrometer_encode, DRONECAN_SENSORS_HYGROMETER_HYGROMETER_ID, DRONECAN_SENSORS_HYGROMETER_HYGROMETER_SIGNATURE, DRONECAN_SENSORS_HYGROMETER_HYGROMETER_MAX_SIZE);
 REGISTER_UAVCAN_TYPE(dronecan_sensors_magnetometer_MagneticFieldStrengthHiRes, dronecan_sensors_magnetometer_MagneticFieldStrengthHiRes_encode, DRONECAN_SENSORS_MAGNETOMETER_MAGNETICFIELDSTRENGTHHIRES_ID, DRONECAN_SENSORS_MAGNETOMETER_MAGNETICFIELDSTRENGTHHIRES_SIGNATURE, DRONECAN_SENSORS_MAGNETOMETER_MAGNETICFIELDSTRENGTHHIRES_MAX_SIZE);

@@ -1,15 +1,32 @@
 #include <dronecan.h>
 
+// Bring up the board-specific CAN peripheral in the requested mode. FD mode is
+// only routed through CANInit_fd on H7 builds where it exists; L431 callers are
+// caught at compile time by the #error in dronecan.h.
+static bool dronecan_can_init(DroneCAN::CanMode mode)
+{
+#if CANARD_ENABLE_CANFD
+    if (mode == DroneCAN::CanMode::FD) {
+        return CANInit_fd(CAN_1000KBPS, 2);
+    }
+#else
+    (void)mode;
+#endif
+    return CANInit(CAN_1000KBPS, 2);
+}
+
 /*
     Kick off the CAN driver, Canard, do some parameter management
 */
 void DroneCAN::init(CanardOnTransferReception onTransferReceived,
                     CanardShouldAcceptTransfer shouldAcceptTransfer,
                     const std::vector<parameter> &param_list,
-                    const char *name)
+                    const char *name,
+                    CanMode mode)
 {
     // start our CAN driver
-    CANInit(CAN_1000KBPS, 2);
+    canfd_default_ = (mode == CanMode::FD);
+    dronecan_can_init(mode);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
 
@@ -73,10 +90,13 @@ static bool DroneCAN_should_accept_adapter(const CanardInstance* ins,
 // Convenience init: uses the built-in adapters and stores `this` as the
 // CanardInstance user reference so the adapters can forward to the proper
 // DroneCAN instance.
-void DroneCAN::init(const std::vector<parameter> &param_list, const char *name)
+void DroneCAN::init(const std::vector<parameter> &param_list,
+                    const char *name,
+                    CanMode mode)
 {
     // start our CAN driver
-    CANInit(CAN_1000KBPS, 2);
+    canfd_default_ = (mode == CanMode::FD);
+    dronecan_can_init(mode);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
 
@@ -123,9 +143,11 @@ void DroneCAN::init(const std::vector<parameter> &param_list, const char *name)
 void DroneCAN::init(CanardOnTransferReception onTransferReceived,
                     CanardShouldAcceptTransfer shouldAcceptTransfer,
                     const char *name,
-                    uint8_t preferred_node_id)
+                    uint8_t preferred_node_id,
+                    CanMode mode)
 {
-    CANInit(CAN_1000KBPS, 2);
+    canfd_default_ = (mode == CanMode::FD);
+    dronecan_can_init(mode);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
 
@@ -259,17 +281,23 @@ void DroneCAN::handle_GetNodeInfo(CanardRxTransfer *transfer)
     strncpy((char *)pkt.name.data, this->node_name, sizeof(pkt.name.data));
     pkt.name.len = strnlen((char *)pkt.name.data, sizeof(pkt.name.data));
 
-    uint16_t total_size = uavcan_protocol_GetNodeInfoResponse_encode(&pkt, buffer);
+    uint16_t total_size = uavcan_protocol_GetNodeInfoResponse_encode(&pkt, buffer
+        CANARD_TAO_ENCODE_ARG(!canfd_default_)
+    );
 
-    canardRequestOrRespond(&canard,
-                           transfer->source_node_id,
-                           UAVCAN_PROTOCOL_GETNODEINFO_SIGNATURE,
-                           UAVCAN_PROTOCOL_GETNODEINFO_ID,
-                           &transfer->transfer_id,
-                           transfer->priority,
-                           CanardResponse,
-                           &buffer[0],
-                           total_size);
+    CanardTxTransfer transfer_object = {
+        .transfer_type = CanardTransferTypeResponse,
+        .data_type_signature = UAVCAN_PROTOCOL_GETNODEINFO_SIGNATURE,
+        .data_type_id = UAVCAN_PROTOCOL_GETNODEINFO_ID,
+        .inout_transfer_id = &transfer->transfer_id,
+        .priority = transfer->priority,
+        .payload = &buffer[0],
+        .payload_len = total_size,
+#if CANARD_ENABLE_CANFD
+        .canfd = canfd_default_,
+#endif
+    };
+    canardRequestOrRespondObj(&canard, transfer->source_node_id, &transfer_object);
 }
 
 /*
@@ -370,16 +398,22 @@ void DroneCAN::handle_param_GetSet(CanardRxTransfer *transfer)
 
     // Encode & send
     uint8_t buffer[UAVCAN_PROTOCOL_PARAM_GETSET_RESPONSE_MAX_SIZE];
-    uint16_t len = uavcan_protocol_param_GetSetResponse_encode(&rsp, buffer);
-    canardRequestOrRespond(&canard,
-                           transfer->source_node_id,
-                           UAVCAN_PROTOCOL_PARAM_GETSET_SIGNATURE,
-                           UAVCAN_PROTOCOL_PARAM_GETSET_ID,
-                           &transfer->transfer_id,
-                           transfer->priority,
-                           CanardResponse,
-                           &buffer[0],
-                           len);
+    uint16_t len = uavcan_protocol_param_GetSetResponse_encode(&rsp, buffer
+        CANARD_TAO_ENCODE_ARG(!canfd_default_)
+    );
+    CanardTxTransfer transfer_object = {
+        .transfer_type = CanardTransferTypeResponse,
+        .data_type_signature = UAVCAN_PROTOCOL_PARAM_GETSET_SIGNATURE,
+        .data_type_id = UAVCAN_PROTOCOL_PARAM_GETSET_ID,
+        .inout_transfer_id = &transfer->transfer_id,
+        .priority = transfer->priority,
+        .payload = &buffer[0],
+        .payload_len = len,
+#if CANARD_ENABLE_CANFD
+        .canfd = canfd_default_,
+#endif
+    };
+    canardRequestOrRespondObj(&canard, transfer->source_node_id, &transfer_object);
 }
 
 /*
@@ -417,17 +451,23 @@ void DroneCAN::handle_param_ExecuteOpcode(CanardRxTransfer *transfer)
     pkt.ok = true;
 
     uint8_t buffer[UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_RESPONSE_MAX_SIZE];
-    uint16_t total_size = uavcan_protocol_param_ExecuteOpcodeResponse_encode(&pkt, buffer);
+    uint16_t total_size = uavcan_protocol_param_ExecuteOpcodeResponse_encode(&pkt, buffer
+        CANARD_TAO_ENCODE_ARG(!canfd_default_)
+    );
 
-    canardRequestOrRespond(&canard,
-                           transfer->source_node_id,
-                           UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_SIGNATURE,
-                           UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_ID,
-                           &transfer->transfer_id,
-                           transfer->priority,
-                           CanardResponse,
-                           &buffer[0],
-                           total_size);
+    CanardTxTransfer transfer_object = {
+        .transfer_type = CanardTransferTypeResponse,
+        .data_type_signature = UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_SIGNATURE,
+        .data_type_id = UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_ID,
+        .inout_transfer_id = &transfer->transfer_id,
+        .priority = transfer->priority,
+        .payload = &buffer[0],
+        .payload_len = total_size,
+#if CANARD_ENABLE_CANFD
+        .canfd = canfd_default_,
+#endif
+    };
+    canardRequestOrRespondObj(&canard, transfer->source_node_id, &transfer_object);
 }
 
 /*
@@ -660,13 +700,19 @@ void DroneCAN::request_DNA()
     memmove(&allocation_request[1], &my_unique_id[DNA.node_id_allocation_unique_id_offset], uid_size);
 
     // Broadcasting the request
-    const int16_t bcast_res = canardBroadcast(&canard,
-                                              UAVCAN_PROTOCOL_DYNAMIC_NODE_ID_ALLOCATION_SIGNATURE,
-                                              UAVCAN_PROTOCOL_DYNAMIC_NODE_ID_ALLOCATION_ID,
-                                              &node_id_allocation_transfer_id,
-                                              CANARD_TRANSFER_PRIORITY_LOW,
-                                              &allocation_request[0],
-                                              (uint16_t)(uid_size + 1));
+    CanardTxTransfer transfer_object = {
+        .transfer_type = CanardTransferTypeBroadcast,
+        .data_type_signature = UAVCAN_PROTOCOL_DYNAMIC_NODE_ID_ALLOCATION_SIGNATURE,
+        .data_type_id = UAVCAN_PROTOCOL_DYNAMIC_NODE_ID_ALLOCATION_ID,
+        .inout_transfer_id = &node_id_allocation_transfer_id,
+        .priority = CANARD_TRANSFER_PRIORITY_LOW,
+        .payload = &allocation_request[0],
+        .payload_len = (uint16_t)(uid_size + 1),
+#if CANARD_ENABLE_CANFD
+        .canfd = canfd_default_,
+#endif
+    };
+    const int16_t bcast_res = canardBroadcastObj(&canard, &transfer_object);
     if (bcast_res < 0)
     {
         if (Serial) {
@@ -732,7 +778,9 @@ void DroneCAN::handle_begin_firmware_update(CanardRxTransfer *transfer)
     uavcan_protocol_file_BeginFirmwareUpdateResponse reply{};
     reply.error = UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE_RESPONSE_ERROR_OK;
 
-    uint16_t total_size = uavcan_protocol_file_BeginFirmwareUpdateResponse_encode(&reply, buffer);
+    uint16_t total_size = uavcan_protocol_file_BeginFirmwareUpdateResponse_encode(&reply, buffer
+        CANARD_TAO_ENCODE_ARG(!canfd_default_)
+    );
     static uint8_t transfer_id;
     CanardTxTransfer transfer_object = {
         .transfer_type = CanardTransferTypeResponse,
@@ -742,6 +790,9 @@ void DroneCAN::handle_begin_firmware_update(CanardRxTransfer *transfer)
         .priority = transfer->priority,
         .payload = &buffer[0],
         .payload_len = total_size,
+#if CANARD_ENABLE_CANFD
+        .canfd = canfd_default_,
+#endif
     };
     const auto res = canardRequestOrRespondObj(&canard,
                                                transfer->source_node_id,
@@ -793,17 +844,23 @@ void DroneCAN::send_firmware_read(void)
     pkt.offset = fwupdate.offset;
     memcpy(pkt.path.path.data, fwupdate.path, pkt.path.path.len);
 
-    uint16_t total_size = uavcan_protocol_file_ReadRequest_encode(&pkt, buffer);
+    uint16_t total_size = uavcan_protocol_file_ReadRequest_encode(&pkt, buffer
+        CANARD_TAO_ENCODE_ARG(!canfd_default_)
+    );
 
-    canardRequestOrRespond(&canard,
-                           fwupdate.node_id,
-                           UAVCAN_PROTOCOL_FILE_READ_SIGNATURE,
-                           UAVCAN_PROTOCOL_FILE_READ_ID,
-                           &fwupdate.transfer_id,
-                           CANARD_TRANSFER_PRIORITY_HIGH,
-                           CanardRequest,
-                           &buffer[0],
-                           total_size);
+    CanardTxTransfer transfer_object = {
+        .transfer_type = CanardTransferTypeRequest,
+        .data_type_signature = UAVCAN_PROTOCOL_FILE_READ_SIGNATURE,
+        .data_type_id = UAVCAN_PROTOCOL_FILE_READ_ID,
+        .inout_transfer_id = &fwupdate.transfer_id,
+        .priority = CANARD_TRANSFER_PRIORITY_HIGH,
+        .payload = &buffer[0],
+        .payload_len = total_size,
+#if CANARD_ENABLE_CANFD
+        .canfd = canfd_default_,
+#endif
+    };
+    canardRequestOrRespondObj(&canard, fwupdate.node_id, &transfer_object);
 }
 
 /*
@@ -879,20 +936,28 @@ void DroneCAN::send_NodeStatus(void)
         }
     }
 
-    uint32_t len = uavcan_protocol_NodeStatus_encode(&node_status, buffer);
+    uint32_t len = uavcan_protocol_NodeStatus_encode(&node_status, buffer
+        CANARD_TAO_ENCODE_ARG(!canfd_default_)
+    );
 
     // we need a static variable for the transfer ID. This is
     // incremeneted on each transfer, allowing for detection of packet
     // loss
     static uint8_t transfer_id;
 
-    canardBroadcast(&canard,
-                    UAVCAN_PROTOCOL_NODESTATUS_SIGNATURE,
-                    UAVCAN_PROTOCOL_NODESTATUS_ID,
-                    &transfer_id,
-                    CANARD_TRANSFER_PRIORITY_LOW,
-                    buffer,
-                    len);
+    CanardTxTransfer transfer_object = {
+        .transfer_type = CanardTransferTypeBroadcast,
+        .data_type_signature = UAVCAN_PROTOCOL_NODESTATUS_SIGNATURE,
+        .data_type_id = UAVCAN_PROTOCOL_NODESTATUS_ID,
+        .inout_transfer_id = &transfer_id,
+        .priority = CANARD_TRANSFER_PRIORITY_LOW,
+        .payload = buffer,
+        .payload_len = (uint16_t)len,
+#if CANARD_ENABLE_CANFD
+        .canfd = canfd_default_,
+#endif
+    };
+    canardBroadcastObj(&canard, &transfer_object);
 }
 
 /*
@@ -957,15 +1022,23 @@ void DroneCAN::debug(const char *msg, uint8_t level)
     strncpy((char *)pkt.text.data, msg, pkt.text.len);
 
     uint8_t buffer[UAVCAN_PROTOCOL_DEBUG_LOGMESSAGE_MAX_SIZE];
-    uint32_t len = uavcan_protocol_debug_LogMessage_encode(&pkt, buffer);
+    uint32_t len = uavcan_protocol_debug_LogMessage_encode(&pkt, buffer
+        CANARD_TAO_ENCODE_ARG(!canfd_default_)
+    );
     static uint8_t transfer_id;
-    canardBroadcast(&canard,
-                    UAVCAN_PROTOCOL_DEBUG_LOGMESSAGE_SIGNATURE,
-                    UAVCAN_PROTOCOL_DEBUG_LOGMESSAGE_ID,
-                    &transfer_id,
-                    CANARD_TRANSFER_PRIORITY_LOW,
-                    buffer,
-                    len);
+    CanardTxTransfer transfer_object = {
+        .transfer_type = CanardTransferTypeBroadcast,
+        .data_type_signature = UAVCAN_PROTOCOL_DEBUG_LOGMESSAGE_SIGNATURE,
+        .data_type_id = UAVCAN_PROTOCOL_DEBUG_LOGMESSAGE_ID,
+        .inout_transfer_id = &transfer_id,
+        .priority = CANARD_TRANSFER_PRIORITY_LOW,
+        .payload = buffer,
+        .payload_len = (uint16_t)len,
+#if CANARD_ENABLE_CANFD
+        .canfd = canfd_default_,
+#endif
+    };
+    canardBroadcastObj(&canard, &transfer_object);
 }
 
 /*
@@ -1002,15 +1075,23 @@ void DroneCANonTransferReceived(DroneCAN &dronecan, CanardInstance *ins, CanardR
             uavcan_protocol_RestartNodeResponse pkt{};
             pkt.ok = true;
             uint8_t buffer[UAVCAN_PROTOCOL_RESTARTNODE_RESPONSE_MAX_SIZE];
-            uint32_t len = uavcan_protocol_RestartNodeResponse_encode(&pkt, buffer);
+            uint32_t len = uavcan_protocol_RestartNodeResponse_encode(&pkt, buffer
+                CANARD_TAO_ENCODE_ARG(!dronecan.canfd_default())
+            );
             static uint8_t transfer_id;
-            canardBroadcast(ins,
-                            UAVCAN_PROTOCOL_RESTARTNODE_RESPONSE_SIGNATURE,
-                            UAVCAN_PROTOCOL_RESTARTNODE_RESPONSE_ID,
-                            &transfer_id,
-                            CANARD_TRANSFER_PRIORITY_LOW,
-                            buffer,
-                            len);
+            CanardTxTransfer transfer_object = {
+                .transfer_type = CanardTransferTypeBroadcast,
+                .data_type_signature = UAVCAN_PROTOCOL_RESTARTNODE_RESPONSE_SIGNATURE,
+                .data_type_id = UAVCAN_PROTOCOL_RESTARTNODE_RESPONSE_ID,
+                .inout_transfer_id = &transfer_id,
+                .priority = CANARD_TRANSFER_PRIORITY_LOW,
+                .payload = buffer,
+                .payload_len = (uint16_t)len,
+#if CANARD_ENABLE_CANFD
+                .canfd = dronecan.canfd_default(),
+#endif
+            };
+            canardBroadcastObj(ins, &transfer_object);
 
             if (Serial) Serial.println("Reset..");
             delay(200);

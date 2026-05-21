@@ -28,6 +28,16 @@ enum BITRATE
 bool CANInit(BITRATE bitrate, int can_iface_index);
 
 /**
+ * @brief Initializes the FDCAN controller in CAN-FD mode (NORMAL_FD + 4x data bitrate).
+ * Peripheral runs FD-capable; per-frame format is then chosen in CANSend() based on
+ * the per-frame canfd flag (libcanard sets this from CanardTxTransfer::canfd).
+ * @param bitrate Nominal arbitration bitrate from the BITRATE enum.
+ * @param can_iface_index Selects the hardware CAN interface.
+ * @return Returns true if initialization is successful, false otherwise.
+ */
+bool CANInit_fd(BITRATE bitrate, int can_iface_index);
+
+/**
  * @brief Sends a CAN frame.
  * This function queues a CAN frame for transmission. It's non-blocking.
  * @param tx_msg A pointer to the CanardCANFrame structure containing the message to be sent.

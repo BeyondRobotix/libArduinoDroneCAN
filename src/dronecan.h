@@ -18,6 +18,10 @@
 #include <app.h>
 #include <simple_dronecanmessages.h>
 
+#if defined(CANL431) && defined(CANARD_ENABLE_CANFD) && CANARD_ENABLE_CANFD
+    #error "CANFD requested on L431; bxCAN hardware does not support FDCAN. Use a CoreNode/MicroNodePlus build, or drop -DCANARD_ENABLE_CANFD."
+#endif
+
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define C_TO_KELVIN(temp) (temp + 273.15f)
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
@@ -27,7 +31,13 @@
 class DroneCAN
 {
 private:
+#if CANARD_ENABLE_CANFD
+    // CANARD_MEM_BLOCK_SIZE is 128 B when CANFD is enabled (vs 32 B for classic),
+    // so we scale the pool to keep block headroom for ~64 in-flight transfers.
+    uint8_t memory_pool[8192];
+#else
     uint8_t memory_pool[1024];
+#endif
     struct uavcan_protocol_NodeStatus node_status;
     CanardCANFrame CAN_TX_msg;
     CanardCANFrame CAN_rx_msg;
@@ -101,6 +111,14 @@ public:
     static constexpr uavcan_protocol_param_Value_type_t BOOL = UAVCAN_PROTOCOL_PARAM_VALUE_BOOLEAN_VALUE;
     static constexpr uavcan_protocol_param_Value_type_t STRING = UAVCAN_PROTOCOL_PARAM_VALUE_STRING_VALUE;
 
+    /*
+        Selects the wire format on H7 boards. Classic = CAN 2.0B (8-byte payload);
+        FD = CANFD (up to 64 bytes, 4x data bitrate). FD requires a board JSON
+        that defines -DCANARD_ENABLE_CANFD=1 (CoreNode / MicroNodePlus); on L431
+        the #error above blocks the FD build entirely.
+    */
+    enum class CanMode { Classic, FD };
+
     std::vector<parameter> parameters;
 
     // copy a parameter list into the object
@@ -109,8 +127,14 @@ public:
         parameters = param_list;
     }
 
-    void init(CanardOnTransferReception onTransferReceived, CanardShouldAcceptTransfer shouldAcceptTransfer, const std::vector<parameter> &param_list, const char *name);
-    void init(const std::vector<parameter> &param_list, const char *name);
+    void init(CanardOnTransferReception onTransferReceived,
+              CanardShouldAcceptTransfer shouldAcceptTransfer,
+              const std::vector<parameter> &param_list,
+              const char *name,
+              CanMode mode = CanMode::Classic);
+    void init(const std::vector<parameter> &param_list,
+              const char *name,
+              CanMode mode = CanMode::Classic);
 
     /*
         Bare init: brings up CAN + canard without touching parameter storage.
@@ -123,7 +147,15 @@ public:
     void init(CanardOnTransferReception onTransferReceived,
               CanardShouldAcceptTransfer shouldAcceptTransfer,
               const char *name,
-              uint8_t preferred_node_id);
+              uint8_t preferred_node_id,
+              CanMode mode = CanMode::Classic);
+
+    /*
+        Returns the default per-frame canfd flag for this node, as set by init(mode).
+        Used by user broadcast helpers (e.g. sendUavcanMsg) so a node init'd with
+        CanMode::FD defaults its broadcasts to FD without callers passing a flag.
+    */
+    bool canfd_default() const { return canfd_default_; }
 
     /*
         Optional hook: called from handle_file_read_response() with each chunk
@@ -203,6 +235,7 @@ private:
     uint8_t  node_status_override_mode   = 0;
     uint16_t node_status_override_vssc   = 0;
     int      cycle_led_pin = 19;
+    bool     canfd_default_ = false;
 
 public:
 
@@ -219,5 +252,16 @@ bool DroneCANshouldAcceptTransfer(const CanardInstance *ins,
                                   uint16_t data_type_id,
                                   CanardTransferType transfer_type,
                                   uint8_t source_node_id);
+
+// Definition of the DroneCAN&-taking sendUavcanMsg overload declared in
+// simple_dronecanmessages.h. Has to live here so DroneCAN's member functions
+// are complete at template instantiation time.
+template<typename Msg>
+inline void sendUavcanMsg(DroneCAN      &dronecan,
+                          Msg           &pkt,
+                          uint8_t        priority)
+{
+    sendUavcanMsg(dronecan.canard, pkt, priority, dronecan.canfd_default());
+}
 
 #endif // ARDU_DRONECAN

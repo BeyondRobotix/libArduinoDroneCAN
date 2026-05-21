@@ -24,44 +24,58 @@ static uint32_t gBeginFDStatus = 0xFFFF; // stored for debug
 #define CAN_EXT_ID_MASK 0x1FFFFFFFU
 
 
-/**
- * @brief Initializes the FDCAN controller.
- *
- * @param bitrate The desired bitrate from the BITRATE enum.
- * @param can_iface_index Selects the CAN interface. 0 for FDCAN1, 1 for FDCAN2 on the NUCLEO-H743ZI2.
- * @return true on success, false on failure.
- */
-bool CANInit(BITRATE bitrate, int can_iface_index) {
-
-    // Select the FDCAN peripheral instance based on the provided index.
+static bool select_iface(int can_iface_index) {
     if (can_iface_index == 1) {
         gCANDriver = &fdcan1;
     } else if (can_iface_index == 2) {
         gCANDriver = &fdcan2;
     } else {
-        // If an invalid index is provided, fail initialization.
         return false;
     }
+    return true;
+}
 
-    // Determine the nominal bitrate from the enum.
-    uint32_t desiredBitrate = 1000 * 1000; // Default to 1Mbit/s
+static uint32_t bitrate_to_hz(BITRATE bitrate) {
     switch (bitrate) {
-        case CAN_50KBPS:   desiredBitrate = 50 * 1000; break;
-        case CAN_100KBPS:  desiredBitrate = 100 * 1000; break;
-        case CAN_125KBPS:  desiredBitrate = 125 * 1000; break;
-        case CAN_250KBPS:  desiredBitrate = 250 * 1000; break;
-        case CAN_500KBPS:  desiredBitrate = 500 * 1000; break;
-        case CAN_1000KBPS: desiredBitrate = 1000 * 1000; break;
+        case CAN_50KBPS:   return  50 * 1000;
+        case CAN_100KBPS:  return 100 * 1000;
+        case CAN_125KBPS:  return 125 * 1000;
+        case CAN_250KBPS:  return 250 * 1000;
+        case CAN_500KBPS:  return 500 * 1000;
+        case CAN_1000KBPS: return 1000 * 1000;
     }
+    return 1000 * 1000;
+}
 
-    ACANFD_STM32_Settings settings(desiredBitrate, DataBitRateFactor::x1);
+/**
+ * @brief Initializes the FDCAN controller in classic CAN mode (no FD, x1 data rate).
+ */
+bool CANInit(BITRATE bitrate, int can_iface_index) {
+    if (!select_iface(can_iface_index)) return false;
 
+    ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), DataBitRateFactor::x1);
     settings.mTxPin = PB_6;
     settings.mRxPin = PB_5;
 
     const uint32_t status = gCANDriver->beginFD(settings);
     gBeginFDStatus = status;
+    return (status == 0);
+}
 
+/**
+ * @brief Initializes the FDCAN controller in CAN-FD mode (NORMAL_FD, 4x data rate).
+ * Matches ArduPilot's typical 1M arb / 4M data configuration.
+ */
+bool CANInit_fd(BITRATE bitrate, int can_iface_index) {
+    if (!select_iface(can_iface_index)) return false;
+
+    ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), DataBitRateFactor::x4);
+    settings.mModuleMode = ACANFD_STM32_Settings::NORMAL_FD;
+    settings.mTxPin = PB_6;
+    settings.mRxPin = PB_5;
+
+    const uint32_t status = gCANDriver->beginFD(settings);
+    gBeginFDStatus = status;
     return (status == 0);
 }
 
@@ -74,26 +88,24 @@ bool CANInit(BITRATE bitrate, int can_iface_index) {
  * @param tx_msg A pointer to the CanardCANFrame to be sent.
  */
 void CANSend(const CanardCANFrame *tx_msg) {
-    if (!gCANDriver) {
-        return; // Do nothing if the driver is not initialized.
+    if (!gCANDriver || !tx_msg) {
+        return;
     }
 
     CANFDMessage message;
-    
-    // Force Extended ID format, matching the canL431 driver's behavior.
     message.ext = true;
-    message.id = tx_msg->id & CAN_EXT_ID_MASK; // Mask to get the 29-bit ID.
-
-    // Copy the data payload and length.
+    message.id  = tx_msg->id & CAN_EXT_ID_MASK;
     message.len = tx_msg->data_len;
-    for (uint8_t i = 0; i < message.len; i++) {
-        message.data[i] = tx_msg->data[i];
-    }
-    
-    // Specify a classic CAN data frame.
-    message.type = CANFDMessage::CAN_DATA;
+    memcpy(message.data, tx_msg->data, tx_msg->data_len);
 
-    // Use the non-blocking send method from the library.
+#if CANARD_ENABLE_CANFD
+    message.type = tx_msg->canfd
+                       ? CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH
+                       : CANFDMessage::CAN_DATA;
+#else
+    message.type = CANFDMessage::CAN_DATA;
+#endif
+
     gCANDriver->tryToSendReturnStatusFD(message);
 }
 
