@@ -2,161 +2,146 @@
 #include "Arduino.h"
 #include "canH743.h"
 
-// --- Message RAM Configuration ---
-// These values MUST be defined as macros before including the ACANFD_STM32.h header.
-// The library's internal headers use these macros to configure the FDCAN peripherals.
-// H743 has 2560 words of Message RAM shared between FDCAN1 and FDCAN2.
-// FDCAN2's start offset = FDCAN1_MESSAGE_RAM_WORD_SIZE, so give FDCAN1 zero
-// to let FDCAN2 use the entire 2560-word region.
-#define FDCAN1_MESSAGE_RAM_WORD_SIZE 0
-#define FDCAN2_MESSAGE_RAM_WORD_SIZE 2560
+// Message RAM split (must be defined before including ACANFD_STM32.h).
+// H743 has 2560 words total. Split 50/50 so either port can be enabled independently
+// or both run concurrently. A PORT1-only build wastes the unused 1280 words — acceptable.
+#define FDCAN1_MESSAGE_RAM_WORD_SIZE 1280
+#define FDCAN2_MESSAGE_RAM_WORD_SIZE 1280
 
-// The ACANFD_STM32 library requires this main header to be included in one .cpp file
-// to instantiate the CAN objects (fdcan1, fdcan2).
 #include <ACANFD_STM32.h>
 
-// A static pointer to the active CAN driver instance (FDCAN1 or FDCAN2).
-// This allows the C-style API functions to interact with the C++ CAN object.
-static ACANFD_STM32 *gCANDriver = nullptr;
-static uint32_t gBeginFDStatus = 0xFFFF; // stored for debug
-
-// This mask is used to extract the 29-bit extended ID from a canard frame ID.
 #define CAN_EXT_ID_MASK 0x1FFFFFFFU
 
+// Per-port driver state. Index 0 = PORT1 (FDCAN2 on CoreNode), index 1 = PORT2 (FDCAN1).
+struct PortState {
+    ACANFD_STM32 *drv          = nullptr;
+    uint32_t      begin_status = 0xFFFF;
+    bool          initialized  = false;
+};
+static PortState gPorts[2];
 
-static bool select_iface(int can_iface_index) {
-    if (can_iface_index == 1) {
-        gCANDriver = &fdcan1;
-    } else if (can_iface_index == 2) {
-        gCANDriver = &fdcan2;
-    } else {
-        return false;
-    }
-    return true;
-}
+// Map port index to driver instance + pin pair.
+// PORT1: FDCAN2 at PB_5 (RX) / PB_6 (TX) — today's production wiring on CoreNode.
+// PORT2: FDCAN1 at PB_8 (RX) / PB_9 (TX) — placeholder; confirm from board schematic.
+struct PortConfig {
+    ACANFD_STM32 *drv;
+    uint32_t      rx_pin;
+    uint32_t      tx_pin;
+};
+static const PortConfig kPortConfig[2] = {
+    { &fdcan2, PB_5, PB_6 }, // PORT1
+    { &fdcan1, PB_8, PB_9 }, // PORT2 (placeholder pins — verify with schematic)
+};
 
 static uint32_t bitrate_to_hz(BITRATE bitrate) {
     switch (bitrate) {
-        case CAN_50KBPS:   return  50 * 1000;
-        case CAN_100KBPS:  return 100 * 1000;
-        case CAN_125KBPS:  return 125 * 1000;
-        case CAN_250KBPS:  return 250 * 1000;
-        case CAN_500KBPS:  return 500 * 1000;
-        case CAN_1000KBPS: return 1000 * 1000;
+        case CAN_50KBPS:   return  50000;
+        case CAN_100KBPS:  return 100000;
+        case CAN_125KBPS:  return 125000;
+        case CAN_250KBPS:  return 250000;
+        case CAN_500KBPS:  return 500000;
+        case CAN_1000KBPS: return 1000000;
     }
-    return 1000 * 1000;
+    return 1000000;
 }
 
-/**
- * @brief Initializes the FDCAN controller in classic CAN mode (no FD, x1 data rate).
- */
-bool CANInit(BITRATE bitrate, int can_iface_index) {
-    if (!select_iface(can_iface_index)) return false;
+static bool init_port(uint8_t idx, ACANFD_STM32_Settings &settings) {
+    settings.mRxPin = kPortConfig[idx].rx_pin;
+    settings.mTxPin = kPortConfig[idx].tx_pin;
+    gPorts[idx].drv = kPortConfig[idx].drv;
+    gPorts[idx].begin_status = gPorts[idx].drv->beginFD(settings);
+    gPorts[idx].initialized  = (gPorts[idx].begin_status == 0);
+    return gPorts[idx].initialized;
+}
 
+bool CANInit(BITRATE bitrate, uint8_t port) {
     ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), DataBitRateFactor::x1);
-    settings.mTxPin = PB_6;
-    settings.mRxPin = PB_5;
-
-    const uint32_t status = gCANDriver->beginFD(settings);
-    gBeginFDStatus = status;
-    return (status == 0);
+    if (port == CAN_PORT_BOTH) {
+        return init_port(0, settings) & init_port(1, settings);
+    }
+    if (port > 1) return false;
+    return init_port(port, settings);
 }
 
-/**
- * @brief Initializes the FDCAN controller in CAN-FD mode (NORMAL_FD, 4x data rate).
- * Matches ArduPilot's typical 1M arb / 4M data configuration.
- */
-bool CANInit_fd(BITRATE bitrate, int can_iface_index) {
-    if (!select_iface(can_iface_index)) return false;
-
+bool CANInit_fd(BITRATE bitrate, uint8_t port) {
     ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), DataBitRateFactor::x4);
     settings.mModuleMode = ACANFD_STM32_Settings::NORMAL_FD;
-    settings.mTxPin = PB_6;
-    settings.mRxPin = PB_5;
-
-    const uint32_t status = gCANDriver->beginFD(settings);
-    gBeginFDStatus = status;
-    return (status == 0);
+    if (port == CAN_PORT_BOTH) {
+        return init_port(0, settings) & init_port(1, settings);
+    }
+    if (port > 1) return false;
+    return init_port(port, settings);
 }
 
-/**
- * @brief Sends a CAN message using the initialized FDCAN peripheral.
- *
- * This function mimics the behavior of the canL431 driver, forcing all
- * outgoing messages to use the Extended ID format for Ardupilot compatibility.
- *
- * @param tx_msg A pointer to the CanardCANFrame to be sent.
- */
-void CANSend(const CanardCANFrame *tx_msg) {
-    if (!gCANDriver || !tx_msg) {
-        return;
-    }
-
+static void send_on(PortState &p, const CanardCANFrame *tx_msg) {
+    if (!p.initialized || !p.drv || !tx_msg) return;
     CANFDMessage message;
     message.ext = true;
     message.id  = tx_msg->id & CAN_EXT_ID_MASK;
     message.len = tx_msg->data_len;
     memcpy(message.data, tx_msg->data, tx_msg->data_len);
-
 #if CANARD_ENABLE_CANFD
     message.type = tx_msg->canfd
-                       ? CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH
-                       : CANFDMessage::CAN_DATA;
+                 ? CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH
+                 : CANFDMessage::CAN_DATA;
 #else
     message.type = CANFDMessage::CAN_DATA;
 #endif
-
-    gCANDriver->tryToSendReturnStatusFD(message);
+    p.drv->tryToSendReturnStatusFD(message);
 }
 
-/**
- * @brief Receives a CAN message if one is available.
- *
- * This function checks the RX FIFO, and if a message is present, it populates
- * the provided CanardCANFrame struct. It only processes extended frames to maintain
- * compatibility with the supplied L431 driver's logic.
- *
- * @param rx_msg A pointer to a CanardCANFrame that will be filled with the received data.
- */
-void CANReceive(CanardCANFrame *rx_msg) {
-    if (!gCANDriver || !gCANDriver->availableFD0()) {
-        return; // Do nothing if driver is not initialized or FIFO is empty.
+void CANSend(const CanardCANFrame *tx_msg, uint8_t port) {
+    if (port == CAN_PORT_BOTH) {
+        send_on(gPorts[0], tx_msg);
+        send_on(gPorts[1], tx_msg);
+    } else if (port <= 1) {
+        send_on(gPorts[port], tx_msg);
     }
+}
 
+static bool recv_from(PortState &p, CanardCANFrame *rx_msg) {
+    if (!p.initialized || !p.drv || !p.drv->availableFD0()) return false;
     CANFDMessage message;
-    if (gCANDriver->receiveFD0(message)) {
-        // Only process extended frames, as implied by the L431 driver logic.
-        if (message.ext) {
-            // Populate the CanardCANFrame for the application.
-            // Set the EFF flag (bit 31) for canard/Ardupilot compatibility.
-            rx_msg->id = message.id | CANARD_CAN_FRAME_EFF;
-            rx_msg->data_len = message.len;
-            
-            for (int i = 0; i < rx_msg->data_len; i++) {
-                rx_msg->data[i] = message.data[i];
-            }
+    if (!p.drv->receiveFD0(message)) return false;
+    if (!message.ext) return false;
+    rx_msg->id       = message.id | CANARD_CAN_FRAME_EFF;
+    rx_msg->data_len = message.len;
+    memcpy(rx_msg->data, message.data, message.len);
+#if CANARD_ENABLE_CANFD
+    rx_msg->canfd = (message.type == CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH
+                  || message.type == CANFDMessage::CANFD_NO_BIT_RATE_SWITCH);
+#endif
+    return true;
+}
 
-            // Set the canfd flag if CAN-FD is enabled in canard build configuration.
-            #if CANARD_ENABLE_CANFD
-                rx_msg->canfd = (message.type == CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH || message.type == CANFDMessage::CANFD_NO_BIT_RATE_SWITCH);
-            #endif
+// Round-robin state for BOTH-mode RX fairness.
+static uint8_t gRxNext = 0;
+
+void CANReceive(CanardCANFrame *rx_msg, uint8_t port) {
+    if (!rx_msg) return;
+    rx_msg->id = 0;
+    if (port <= 1) {
+        recv_from(gPorts[port], rx_msg);
+    } else {
+        // Try the next port first, then the other, to keep both draining fairly.
+        if (!recv_from(gPorts[gRxNext], rx_msg)) {
+            gRxNext ^= 1;
+            recv_from(gPorts[gRxNext], rx_msg);
+        } else {
+            gRxNext ^= 1;
         }
-        // Standard frames are ignored.
     }
 }
 
-/**
- * @brief Checks for available CAN messages.
- *
- * @return The number of messages pending in the driver's software receive FIFO 0.
- */
-uint8_t CANMsgAvail(void) {
-    if (!gCANDriver) {
-        return 0;
+uint8_t CANMsgAvail(uint8_t port) {
+    if (port == CAN_PORT_BOTH) {
+        uint8_t n = 0;
+        if (gPorts[0].initialized && gPorts[0].drv) n += gPorts[0].drv->driverReceiveFIFO0Count();
+        if (gPorts[1].initialized && gPorts[1].drv) n += gPorts[1].drv->driverReceiveFIFO0Count();
+        return n;
     }
-    // Return the fill level of the driver's receive FIFO.
-    return gCANDriver->driverReceiveFIFO0Count();
+    if (port > 1 || !gPorts[port].initialized || !gPorts[port].drv) return 0;
+    return gPorts[port].drv->driverReceiveFIFO0Count();
 }
 
 #endif // CANH7
-

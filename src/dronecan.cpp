@@ -1,18 +1,25 @@
 #include <dronecan.h>
 
-// Bring up the board-specific CAN peripheral in the requested mode. FD mode is
-// only routed through CANInit_fd on H7 builds where it exists; L431 callers are
-// caught at compile time by the #error in dronecan.h.
-static bool dronecan_can_init(DroneCAN::CanMode mode)
+// Bring up the board-specific CAN peripheral(s) for the requested mode and port.
+// L431 is single-port; port arg is ignored and the fixed remap=2 (PB8/PB9) is used.
+static bool dronecan_can_init(DroneCAN::CanMode mode, uint8_t port)
 {
+#ifdef CANL431
+    (void)port; // L431 has one fixed CAN port wired at remap=2 (PB8/PB9)
 #if CANARD_ENABLE_CANFD
-    if (mode == DroneCAN::CanMode::FD) {
-        return CANInit_fd(CAN_1000KBPS, 2);
-    }
+    if (mode == DroneCAN::CanMode::FD) return CANInit_fd(CAN_1000KBPS, 2);
 #else
     (void)mode;
 #endif
     return CANInit(CAN_1000KBPS, 2);
+#else
+#if CANARD_ENABLE_CANFD
+    if (mode == DroneCAN::CanMode::FD) return CANInit_fd(CAN_1000KBPS, port);
+#else
+    (void)mode;
+#endif
+    return CANInit(CAN_1000KBPS, port);
+#endif
 }
 
 /*
@@ -22,11 +29,16 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
                     CanardShouldAcceptTransfer shouldAcceptTransfer,
                     const std::vector<parameter> &param_list,
                     const char *name,
-                    CanMode mode)
+                    CanMode mode,
+                    CanPort port,
+                    int storage_page)
 {
-    // start our CAN driver
+    port_         = port;
+    storage_page_ = (storage_page >= 0)
+                  ? (uint32_t)storage_page
+                  : DroneCAN_Storage::default_page((uint8_t)port);
     canfd_default_ = (mode == CanMode::FD);
-    dronecan_can_init(mode);
+    dronecan_can_init(mode, (uint8_t)port);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
 
@@ -92,11 +104,16 @@ static bool DroneCAN_should_accept_adapter(const CanardInstance* ins,
 // DroneCAN instance.
 void DroneCAN::init(const std::vector<parameter> &param_list,
                     const char *name,
-                    CanMode mode)
+                    CanMode mode,
+                    CanPort port,
+                    int storage_page)
 {
-    // start our CAN driver
+    port_         = port;
+    storage_page_ = (storage_page >= 0)
+                  ? (uint32_t)storage_page
+                  : DroneCAN_Storage::default_page((uint8_t)port);
     canfd_default_ = (mode == CanMode::FD);
-    dronecan_can_init(mode);
+    dronecan_can_init(mode, (uint8_t)port);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
 
@@ -144,10 +161,13 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
                     CanardShouldAcceptTransfer shouldAcceptTransfer,
                     const char *name,
                     uint8_t preferred_node_id,
-                    CanMode mode)
+                    CanMode mode,
+                    CanPort port)
 {
+    port_          = port;
+    storage_page_  = DroneCAN_Storage::default_page((uint8_t)port);
     canfd_default_ = (mode == CanMode::FD);
-    dronecan_can_init(mode);
+    dronecan_can_init(mode, (uint8_t)port);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
 
@@ -442,7 +462,7 @@ void DroneCAN::handle_param_ExecuteOpcode(CanardRxTransfer *transfer)
         {
             values[i] = parameters[i].value;
         }
-        DroneCAN_Storage::save_all(values.data(), values.size());
+        DroneCAN_Storage::save_all(values.data(), values.size(), storage_page_);
     }
 
     struct uavcan_protocol_param_ExecuteOpcodeResponse pkt;
@@ -485,7 +505,7 @@ void DroneCAN::read_parameter_memory()
         values[i] = parameters[i].value;
     }
 
-    if (DroneCAN_Storage::load(values.data(), values.size()))
+    if (DroneCAN_Storage::load(values.data(), values.size(), storage_page_))
     {
         for (size_t i = 0; i < parameters.size(); i++)
         {
@@ -496,7 +516,7 @@ void DroneCAN::read_parameter_memory()
     {
         // No valid data in flash — save the code defaults so they
         // survive reboots even if the user never triggers a CAN save.
-        DroneCAN_Storage::save_all(values.data(), values.size());
+        DroneCAN_Storage::save_all(values.data(), values.size(), storage_page_);
     }
 }
 
@@ -557,7 +577,7 @@ void DroneCAN::setParameterByIndex(size_t idx, float value)
 
     // Set value and persist to storage
     parameters[idx].value = value;
-    DroneCAN_Storage::save(idx, value, parameters.size());
+    DroneCAN_Storage::save(idx, value, parameters.size(), storage_page_);
 }
 
 /*
@@ -986,10 +1006,11 @@ void DroneCAN::process1HzTasks(uint64_t timestamp_usec)
 */
 void DroneCAN::processTx()
 {
+    const uint8_t port = (uint8_t)port_;
     for (const CanardCANFrame *txf = NULL; (txf = canardPeekTxQueue(&canard)) != NULL;)
     {
-        CANSend(txf);
-        canardPopTxQueue(&canard); // fuck it we ball
+        CANSend(txf, port);
+        canardPopTxQueue(&canard);
     }
 }
 
@@ -999,9 +1020,10 @@ void DroneCAN::processTx()
 void DroneCAN::processRx()
 {
     const uint64_t timestamp = micros();
-    if (CANMsgAvail())
+    const uint8_t port = (uint8_t)port_;
+    if (CANMsgAvail(port))
     {
-        CANReceive(&CAN_rx_msg);
+        CANReceive(&CAN_rx_msg, port);
         int ret = canardHandleRxFrame(&canard, &CAN_rx_msg, timestamp);
         if (ret < 0)
         {

@@ -119,6 +119,20 @@ public:
     */
     enum class CanMode { Classic, FD };
 
+    /*
+        Selects which physical CAN port this instance runs on (H7 only).
+        PORT1 = board's primary/existing port (preserves current pin/peripheral).
+        PORT2 = secondary port (placeholder pins — confirm from board schematic).
+        BOTH  = bridged: TX fans out to both ports, RX merged into one canard
+                instance (libcanard's transfer-ID dedup handles duplicates).
+        L4 (MicroNode) always uses its single port regardless of this value.
+    */
+    enum class CanPort : uint8_t {
+        PORT1 = 0,  // CoreNode -> FDCAN2 (PB_5/PB_6); MicroNodePlus -> FDCAN1 (PD_0/PD_1)
+        PORT2 = 1,  // Placeholder pins — verify with board schematic before use
+        BOTH  = 2,  // Bridged redundant-interface mode
+    };
+
     std::vector<parameter> parameters;
 
     // copy a parameter list into the object
@@ -131,10 +145,14 @@ public:
               CanardShouldAcceptTransfer shouldAcceptTransfer,
               const std::vector<parameter> &param_list,
               const char *name,
-              CanMode mode = CanMode::Classic);
+              CanMode mode = CanMode::Classic,
+              CanPort port = CanPort::PORT1,
+              int storage_page = -1);
     void init(const std::vector<parameter> &param_list,
               const char *name,
-              CanMode mode = CanMode::Classic);
+              CanMode mode = CanMode::Classic,
+              CanPort port = CanPort::PORT1,
+              int storage_page = -1);
 
     /*
         Bare init: brings up CAN + canard without touching parameter storage.
@@ -148,7 +166,8 @@ public:
               CanardShouldAcceptTransfer shouldAcceptTransfer,
               const char *name,
               uint8_t preferred_node_id,
-              CanMode mode = CanMode::Classic);
+              CanMode mode = CanMode::Classic,
+              CanPort port = CanPort::PORT1);
 
     /*
         Returns the default per-frame canfd flag for this node, as set by init(mode).
@@ -236,6 +255,8 @@ private:
     uint16_t node_status_override_vssc   = 0;
     int      cycle_led_pin = 19;
     bool     canfd_default_ = false;
+    CanPort  port_          = CanPort::PORT1;
+    uint32_t storage_page_  = 0; // resolved by init() from the storage_page arg
 
 public:
 

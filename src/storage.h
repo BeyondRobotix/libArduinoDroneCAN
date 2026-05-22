@@ -21,18 +21,20 @@
 class DroneCAN_Storage
 {
 public:
-    // Load parameter values from persistent storage into the given array.
-    // Returns true if the storage contained valid data, false otherwise
-    // (in which case the array is left untouched so code defaults are kept).
-    static bool load(float *values, size_t count);
+    // Return the flash page number for a given port index (0=PORT1, 1=PORT2).
+    // PORT1 -> last page, PORT2 -> second-to-last.
+    // Callers may pass a specific page override instead of calling this.
+    static uint32_t default_page(uint8_t port_index = 0);
 
-    // Persist a single parameter value at the given index.
-    // Internally this rewrites the entire page (reads current values,
-    // patches the one that changed, erases, writes).
-    static void save(size_t index, float value, size_t total_count);
+    // Load parameter values from the given flash page into the array.
+    // Returns true if the page contained valid data; leaves array untouched otherwise.
+    static bool load(float *values, size_t count, uint32_t page);
 
-    // Persist all parameter values at once.
-    static void save_all(const float *values, size_t count);
+    // Persist a single parameter value at the given index on the given page.
+    static void save(size_t index, float value, size_t total_count, uint32_t page);
+
+    // Persist all parameter values at once to the given page.
+    static void save_all(const float *values, size_t count, uint32_t page);
 
 private:
     static constexpr uint32_t STORAGE_MAGIC = 0x4443414E; // "DCAN"
@@ -42,15 +44,12 @@ private:
     // to the largest so the same logic works everywhere.
     static constexpr size_t WRITE_ALIGN = 32;
 
-    // Return the flash page used for storage.
-    static uint32_t storage_page();
-
     // Round a byte count up to the next WRITE_ALIGN boundary.
     static size_t align_up(size_t n);
 
-    // Write the full blob (params + magic) to the storage page.
+    // Write the full blob (params + magic) to the given page.
     // Erases first, then writes.  Returns true on success.
-    static bool write_page(const float *values, size_t count);
+    static bool write_page(const float *values, size_t count, uint32_t page);
 };
 
 #endif // DRONECAN_STORAGE_H

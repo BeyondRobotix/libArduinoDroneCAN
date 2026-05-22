@@ -4,15 +4,17 @@
 #include <string.h>
 
 /*
-    Return the flash page index used for parameter storage.
-    Defaults to the last page so it stays out of the firmware region.
+    Return the flash page for a given port index (0=PORT1, 1=PORT2).
+    PORT1 gets the last page; PORT2 gets second-to-last.
+    STORAGE_FLASH_PAGE overrides everything for single-instance builds.
 */
-uint32_t DroneCAN_Storage::storage_page()
+uint32_t DroneCAN_Storage::default_page(uint8_t port_index)
 {
 #ifdef STORAGE_FLASH_PAGE
     return STORAGE_FLASH_PAGE;
 #else
-    return stm32_flash_getnumpages() - 1;
+    uint32_t last = stm32_flash_getnumpages() - 1;
+    return (port_index <= 1) ? (last - port_index) : last;
 #endif
 }
 
@@ -30,9 +32,9 @@ size_t DroneCAN_Storage::align_up(size_t n)
     missing — this preserves code-defined defaults on first boot or after
     a full chip erase.
 */
-bool DroneCAN_Storage::load(float *values, size_t count)
+bool DroneCAN_Storage::load(float *values, size_t count, uint32_t page)
 {
-    uint32_t base = stm32_flash_getpageaddr(storage_page());
+    uint32_t base = stm32_flash_getpageaddr(page);
     if (base == 0) {
         return false;
     }
@@ -65,11 +67,11 @@ bool DroneCAN_Storage::load(float *values, size_t count)
       2. patch the one value that changed
       3. erase + rewrite the full page
 */
-void DroneCAN_Storage::save(size_t index, float value, size_t total_count)
+void DroneCAN_Storage::save(size_t index, float value, size_t total_count, uint32_t page)
 {
     // Build a working copy of all values
     float buf[total_count];
-    uint32_t base = stm32_flash_getpageaddr(storage_page());
+    uint32_t base = stm32_flash_getpageaddr(page);
 
     // Start from flash if it has valid data, otherwise zero-init
     size_t magic_offset = total_count * sizeof(float);
@@ -82,15 +84,15 @@ void DroneCAN_Storage::save(size_t index, float value, size_t total_count)
     }
 
     buf[index] = value;
-    write_page(buf, total_count);
+    write_page(buf, total_count, page);
 }
 
 /*
     Persist every parameter value.
 */
-void DroneCAN_Storage::save_all(const float *values, size_t count)
+void DroneCAN_Storage::save_all(const float *values, size_t count, uint32_t page)
 {
-    write_page(values, count);
+    write_page(values, count, page);
 }
 
 /*
@@ -98,9 +100,8 @@ void DroneCAN_Storage::save_all(const float *values, size_t count)
     The buffer written to flash is zero-padded to WRITE_ALIGN so that the
     H7's 32-byte write requirement is always satisfied.
 */
-bool DroneCAN_Storage::write_page(const float *values, size_t count)
+bool DroneCAN_Storage::write_page(const float *values, size_t count, uint32_t page)
 {
-    uint32_t page = storage_page();
     uint32_t base = stm32_flash_getpageaddr(page);
     if (base == 0) {
         return false;

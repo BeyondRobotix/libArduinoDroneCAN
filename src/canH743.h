@@ -5,10 +5,6 @@
 #include <canard.h>
 #include <ACANFD_STM32_from_cpp.h>
 
-/**
- * @brief Defines standard CAN bitrates.
- * This enum provides a list of common bitrates for CAN communication.
- */
 enum BITRATE
 {
     CAN_50KBPS,
@@ -19,43 +15,27 @@ enum BITRATE
     CAN_1000KBPS
 };
 
-/**
- * @brief Initializes the FDCAN controller with a specified bitrate and interface.
- * @param bitrate The desired communication speed from the BITRATE enum.
- * @param can_iface_index Selects the hardware CAN interface (0 for FDCAN1, 1 for FDCAN2, etc.).
- * @return Returns true if initialization is successful, false otherwise.
- */
-bool CANInit(BITRATE bitrate, int can_iface_index);
+// Port selectors — values match DroneCAN::CanPort (0=PORT1, 1=PORT2, 2=BOTH).
+// PORT1 on CoreNode = FDCAN2 (today's wiring, PB_5/PB_6).
+// PORT2 on CoreNode = FDCAN1 (placeholder pins PB_8/PB_9 — confirm from schematic).
+static constexpr uint8_t CAN_PORT1 = 0;
+static constexpr uint8_t CAN_PORT2 = 1;
+static constexpr uint8_t CAN_PORT_BOTH = 2;
 
-/**
- * @brief Initializes the FDCAN controller in CAN-FD mode (NORMAL_FD + 4x data bitrate).
- * Peripheral runs FD-capable; per-frame format is then chosen in CANSend() based on
- * the per-frame canfd flag (libcanard sets this from CanardTxTransfer::canfd).
- * @param bitrate Nominal arbitration bitrate from the BITRATE enum.
- * @param can_iface_index Selects the hardware CAN interface.
- * @return Returns true if initialization is successful, false otherwise.
- */
-bool CANInit_fd(BITRATE bitrate, int can_iface_index);
+// Classic CAN init for the given port.
+bool CANInit(BITRATE bitrate, uint8_t port = CAN_PORT1);
 
-/**
- * @brief Sends a CAN frame.
- * This function queues a CAN frame for transmission. It's non-blocking.
- * @param tx_msg A pointer to the CanardCANFrame structure containing the message to be sent.
- */
-void CANSend(const CanardCANFrame *tx_msg);
+// CAN-FD init (NORMAL_FD, 4x data rate) for the given port.
+bool CANInit_fd(BITRATE bitrate, uint8_t port = CAN_PORT1);
 
-/**
- * @brief Receives a CAN frame.
- * If a message is available in the FIFO, this function populates the provided struct with its data.
- * @param rx_msg A pointer to a CanardCANFrame structure to be filled with the received message data.
- */
-void CANReceive(CanardCANFrame *rx_msg);
+// Send a frame on the given port. BOTH fans out to both peripherals.
+void CANSend(const CanardCANFrame *tx_msg, uint8_t port = CAN_PORT1);
 
-/**
- * @brief Checks for available CAN messages in the receive buffer.
- * @return The number of messages currently pending in the RX FIFO.
- */
-uint8_t CANMsgAvail(void);
+// Receive one frame from the given port. BOTH drains whichever port has data.
+void CANReceive(CanardCANFrame *rx_msg, uint8_t port = CAN_PORT1);
+
+// Number of frames pending in the RX FIFO for the given port (BOTH = sum).
+uint8_t CANMsgAvail(uint8_t port = CAN_PORT1);
 
 #endif // CAN_DRIVER_H7_
 #endif // CANH7
