@@ -2,150 +2,176 @@
 #include "Arduino.h"
 #include "canH723.h"
 
-// --- Message RAM Configuration ---
-// These values MUST be defined as macros before including the ACANFD_STM32.h header.
-// The library's internal headers use these macros to configure the FDCAN peripherals.
+// Message RAM split (must be defined before including ACANFD_STM32.h).
+// H723 has 2560 words total shared across FDCAN1/2/3. Equal 3-way split;
+// FDCAN3 is reserved for future use (not routed on MicroNodePlus).
 #define FDCAN1_MESSAGE_RAM_WORD_SIZE 800
 #define FDCAN2_MESSAGE_RAM_WORD_SIZE 800
 #define FDCAN3_MESSAGE_RAM_WORD_SIZE 800
 
-// The ACANFD_STM32 library requires this main header to be included in one .cpp file
-// to instantiate the CAN objects (fdcan1, fdcan2, fdcan3).
 #include <ACANFD_STM32.h>
 
-// --- FDCAN peripheral handles ---
-// An array to easily select the CAN interface at runtime.
-static ACANFD_STM32* can_ifaces[] = {&fdcan1, &fdcan2, &fdcan3};
-// Pointer to the currently active CAN interface.
-static ACANFD_STM32* active_can_iface = nullptr;
-// Maximum number of supported CAN interfaces on the H723ZG.
-const int MAX_CAN_IFACES = sizeof(can_ifaces) / sizeof(can_ifaces[0]);
+// Per-port driver state. Index 0 = PORT1 (FDCAN1), index 1 = PORT2 (FDCAN2).
+struct PortState {
+    ACANFD_STM32 *drv          = nullptr;
+    uint32_t      begin_status = 0xFFFF;
+    bool          initialized  = false;
+};
+static PortState gPorts[2];
 
+// Map port index to driver instance + pin pair.
+// PORT1: FDCAN1 at PD_0 (RX) / PD_1 (TX) — today's production wiring on MicroNodePlus.
+// PORT2: FDCAN2 at PB_5 (RX) / PB_6 (TX) — placeholder; confirm from board schematic.
+struct PortConfig {
+    ACANFD_STM32 *drv;
+    uint32_t      rx_pin;
+    uint32_t      tx_pin;
+};
+static const PortConfig kPortConfig[2] = {
+    { &fdcan1, PD_0, PD_1 }, // PORT1
+    { &fdcan2, PB_5, PB_6 }, // PORT2 — FDCAN2_RX=PB5, FDCAN2_TX=PB6 (AF9)
+};
 
-/**
- * @brief Initializes the FDCAN controller.
- *
- * @param bitrate The desired bitrate from the BITRATE enum.
- * @param can_iface_index Selects the CAN interface. 0 for FDCAN1, 1 for FDCAN2, 2 for FDCAN3.
- * @return true on success, false on failure.
- */
-bool CANInit(BITRATE bitrate, int can_iface_index) {
-    can_iface_index = 0;
-    if (can_iface_index < 0 || can_iface_index >= MAX_CAN_IFACES) {
-        return false;
-    }
-
-    active_can_iface = can_ifaces[can_iface_index];
-
-    uint32_t nominal_bitrate = 0;
+static uint32_t bitrate_to_hz(BITRATE bitrate) {
     switch (bitrate) {
-        case CAN_50KBPS:
-            nominal_bitrate = 50 * 1000;
-            break;
-        case CAN_100KBPS:
-            nominal_bitrate = 100 * 1000;
-            break;
-        case CAN_125KBPS:
-            nominal_bitrate = 125 * 1000;
-            break;
-        case CAN_250KBPS:
-            nominal_bitrate = 250 * 1000;
-            break;
-        case CAN_500KBPS:
-            nominal_bitrate = 500 * 1000;
-            break;
-        case CAN_1000KBPS:
-        default:
-            nominal_bitrate = 1000 * 1000;
-            break;
+        case CAN_50KBPS:   return  50000;
+        case CAN_100KBPS:  return 100000;
+        case CAN_125KBPS:  return 125000;
+        case CAN_250KBPS:  return 250000;
+        case CAN_500KBPS:  return 500000;
+        case CAN_1000KBPS: return 1000000;
     }
+    return 1000000;
+}
 
-    // Configure settings for CAN FD with a 4x data rate multiplier.
-    // This is a common configuration for ArduPilot UAVCAN nodes.
-    ACANFD_STM32_Settings settings(nominal_bitrate, DataBitRateFactor::x4);
+static bool init_port(uint8_t idx, ACANFD_STM32_Settings &settings) {
+    settings.mRxPin = kPortConfig[idx].rx_pin;
+    settings.mTxPin = kPortConfig[idx].tx_pin;
+    gPorts[idx].drv = kPortConfig[idx].drv;
+    gPorts[idx].begin_status = gPorts[idx].drv->beginFD(settings);
+    gPorts[idx].initialized  = (gPorts[idx].begin_status == 0);
+    return gPorts[idx].initialized;
+}
+
+// "Classic" mode: peripheral runs NORMAL_FD at x4 data rate so it can *receive*
+// FD frames from other nodes (e.g. ArduPilot with UC_OPTION +4). The Classic/FD
+// distinction only affects the per-frame TX canfd flag, not the peripheral config.
+bool CANInit(BITRATE bitrate, uint8_t port) {
+    ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), DataBitRateFactor::x4);
     settings.mModuleMode = ACANFD_STM32_Settings::NORMAL_FD;
-
-    // Start the FDCAN peripheral. The return code is 0 on success.
-    settings.mTxPin = PD_1;
-    settings.mRxPin = PD_0;
-    uint32_t error_code = active_can_iface->beginFD(settings);
-
-    return error_code == 0;
+    if (port == CAN_PORT_BOTH) {
+        return init_port(0, settings) & init_port(1, settings);
+    }
+    if (port > 1) return false;
+    return init_port(port, settings);
 }
 
-/**
- * @brief Sends a CAN message using the initialized FDCAN peripheral.
- *
- * This function converts a CanardCANFrame to the library's CANFDMessage format.
- * It forces all outgoing messages to use the Extended ID format for Ardupilot compatibility.
- *
- * @param tx_msg A pointer to the CanardCANFrame to be sent.
- */
-void CANSend(const CanardCANFrame *tx_msg) {
-    if (!active_can_iface || !tx_msg) {
-        return;
+bool CANInit_fd(BITRATE bitrate, uint8_t port) {
+    ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), DataBitRateFactor::x4);
+    settings.mModuleMode = ACANFD_STM32_Settings::NORMAL_FD;
+    if (port == CAN_PORT_BOTH) {
+        return init_port(0, settings) & init_port(1, settings);
     }
+    if (port > 1) return false;
+    return init_port(port, settings);
+}
 
+// Returns true if the message was accepted by the driver's TX FIFO.
+static bool send_on(PortState &p, const CanardCANFrame *tx_msg) {
+    if (!p.initialized || !p.drv || !tx_msg) return false;
     CANFDMessage message;
-    // ArduPilot's CAN drivers exclusively use extended frames.
     message.ext = true;
-    message.id = tx_msg->id & CANARD_CAN_EXT_ID_MASK;
+    message.id  = tx_msg->id & 0x1FFFFFFFU;
     message.len = tx_msg->data_len;
-    message.type = CANFDMessage::CAN_DATA;
-
     memcpy(message.data, tx_msg->data, tx_msg->data_len);
-
-    // Attempt to send the message. This is non-blocking.
-    uint32_t send_status = active_can_iface->tryToSendReturnStatusFD(message);
-    if (send_status != 0) {
-        if (Serial) Serial.println("Failed to send CAN message");
-    }
+#if CANARD_ENABLE_CANFD
+    // Temporarily forcing NO_BIT_RATE_SWITCH while diagnosing the 4 Mbps BRS
+    // bus-off issue. FD framing intact, payload stays at nominal bitrate.
+    // Restore to CANFD_WITH_BIT_RATE_SWITCH once the BRS issue is resolved.
+    message.type = tx_msg->canfd
+                 ? CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH
+                 : CANFDMessage::CAN_DATA;
+#else
+    message.type = CANFDMessage::CAN_DATA;
+#endif
+    // tryToSendReturnStatusFD returns 0 on success, non-zero on FIFO-full / error.
+    return p.drv->tryToSendReturnStatusFD(message) == 0;
 }
 
-
-/**
- * @brief Receives a CAN message if one is available.
- *
- * This function checks the RX FIFO 0, and if a message is present, it populates
- * the provided CanardCANFrame struct.
- *
- * @param rx_msg A pointer to a CanardCANFrame that will be filled with the received data.
- */
-void CANReceive(CanardCANFrame *rx_msg) {
-    if (!active_can_iface || !rx_msg) {
-        return;
+bool CANSend(const CanardCANFrame *tx_msg, uint8_t port) {
+    if (port == CAN_PORT_BOTH) {
+        // For the fan-out case, succeed only if both peripherals accept the frame.
+        // If either fails the caller will retry next cycle.
+        const bool a = send_on(gPorts[0], tx_msg);
+        const bool b = send_on(gPorts[1], tx_msg);
+        return a && b;
     }
+    if (port <= 1) {
+        return send_on(gPorts[port], tx_msg);
+    }
+    return false;
+}
 
+static bool recv_from(PortState &p, CanardCANFrame *rx_msg) {
+    if (!p.initialized || !p.drv || !p.drv->availableFD0()) return false;
     CANFDMessage message;
-    // Check RX FIFO 0 for a new message.
-    if (active_can_iface->receiveFD0(message)) {
-        // Populate the Canard frame from the received library message.
-        
-        rx_msg->id = (0x1FFFFFFFU & message.id) & 0x1FFFFFFFU;
-        rx_msg->id |= 1U << 31; // https://github.com/ArduPilot/ardupilot/blob/4d31a7320a1d2c38e2d742ae63c34f914febaa8f/libraries/AP_HAL_ChibiOS/CanIface.cpp#L570
-   
-        rx_msg->data_len = message.len;
+    if (!p.drv->receiveFD0(message)) return false;
+    if (!message.ext) return false;
+    rx_msg->id       = (message.id & 0x1FFFFFFFU) | CANARD_CAN_FRAME_EFF;
+    rx_msg->data_len = message.len;
+    memcpy(rx_msg->data, message.data, message.len);
+#if CANARD_ENABLE_CANFD
+    rx_msg->canfd = (message.type == CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH
+                  || message.type == CANFDMessage::CANFD_NO_BIT_RATE_SWITCH);
+#endif
+    return true;
+}
 
-        memcpy(rx_msg->data, message.data, message.len);
+static uint8_t gRxNext = 0;
+
+void CANReceive(CanardCANFrame *rx_msg, uint8_t port) {
+    if (!rx_msg) return;
+    rx_msg->id = 0;
+    if (port <= 1) {
+        recv_from(gPorts[port], rx_msg);
     } else {
-        // No message received, set ID to 0 to indicate an invalid/empty frame.
-        rx_msg->id = 0;
-        rx_msg->data_len = 0;
+        if (!recv_from(gPorts[gRxNext], rx_msg)) {
+            gRxNext ^= 1;
+            recv_from(gPorts[gRxNext], rx_msg);
+        } else {
+            gRxNext ^= 1;
+        }
     }
 }
 
-/**
- * @brief Checks for available CAN messages.
- *
- * @return The number of messages pending in the driver's software receive FIFO 0.
- */
-uint8_t CANMsgAvail(void) {
-    if (!active_can_iface) {
-        return 0;
+// Edge-triggered bus-off detector. Called from CANMsgAvail() so it's polled
+// every main-loop iteration. ACANFD_STM32::statusFlags() bit 4 = PSR.BO.
+// Prints once when a port enters bus-off and once when it recovers — no spam.
+static void check_bus_off_once(uint8_t idx) {
+    static bool was_bus_off[2] = { false, false };
+    if (!gPorts[idx].initialized || !gPorts[idx].drv) return;
+    const bool bus_off = (gPorts[idx].drv->statusFlags() & (1U << 4)) != 0;
+    if (bus_off != was_bus_off[idx]) {
+        if (Serial) {
+            Serial.print(bus_off ? "CANFD BUS-OFF on PORT" : "CANFD recovered on PORT");
+            Serial.println(idx + 1);
+        }
+        was_bus_off[idx] = bus_off;
     }
-    // Return the number of messages available in RX FIFO 0.
-    return active_can_iface->availableFD0();
+}
+
+uint8_t CANMsgAvail(uint8_t port) {
+    if (port == CAN_PORT_BOTH) {
+        check_bus_off_once(0);
+        check_bus_off_once(1);
+        uint8_t n = 0;
+        if (gPorts[0].initialized && gPorts[0].drv) n += gPorts[0].drv->availableFD0();
+        if (gPorts[1].initialized && gPorts[1].drv) n += gPorts[1].drv->availableFD0();
+        return n;
+    }
+    if (port > 1 || !gPorts[port].initialized || !gPorts[port].drv) return 0;
+    check_bus_off_once(port);
+    return gPorts[port].drv->availableFD0();
 }
 
 #endif // ARDUINO_NUCLEO_H723ZG
-

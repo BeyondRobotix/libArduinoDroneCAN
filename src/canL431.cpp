@@ -292,7 +292,7 @@ uint8_t dlcToDataLength(uint8_t dlc)
  * @params CAN_rx_msg - CAN message structure for reception
  *
  */
-void CANReceive(CanardCANFrame *CAN_rx_msg)
+void CANReceive(CanardCANFrame *CAN_rx_msg, uint8_t /*port*/)
 {
     uint32_t id = CAN1->sFIFOMailBox[0].RIR;
 
@@ -329,7 +329,7 @@ void CANReceive(CanardCANFrame *CAN_rx_msg)
  * @params CAN_tx_msg - CAN message structure for transmission
  *
  */
-void CANSend(const CanardCANFrame *CAN_tx_msg)
+bool CANSend(const CanardCANFrame *CAN_tx_msg, uint8_t /*port*/)
 {
     volatile int count = 0;
 
@@ -367,6 +367,7 @@ void CANSend(const CanardCANFrame *CAN_tx_msg)
 
     // The mailbox don't becomes empty while loop -- caller can poll
     // CAN1->ESR / MSR / TSR for diagnostics if needed.
+    return true;
 }
 
 /**
@@ -375,7 +376,7 @@ void CANSend(const CanardCANFrame *CAN_tx_msg)
  * @returns If pending CAN messages are in the CAN controller
  *
  */
-uint8_t CANMsgAvail(void)
+uint8_t CANMsgAvail(uint8_t /*port*/)
 {
     // Check for pending FIFO 0 messages
     return CAN1->RF0R & 0x3UL;

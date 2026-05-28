@@ -46,12 +46,14 @@ enum
 
 extern CAN_bit_timing_config_t can_configs[6];
 
-uint8_t CANMsgAvail(void);
-void CANSend(const CanardCANFrame *CAN_tx_msg);
-void CANReceive(CanardCANFrame *CAN_rx_msg);
-void CANSetFilters(uint16_t *ids, uint8_t num);
-void CANSetFilter(uint16_t id);
-bool CANInit(BITRATE bitrate, int remap);
+// port arg accepted for API parity with H7 drivers but ignored (single CAN port on L4).
+uint8_t CANMsgAvail(uint8_t port = 0);
+bool    CANSend(const CanardCANFrame *CAN_tx_msg, uint8_t port = 0);
+void    CANReceive(CanardCANFrame *CAN_rx_msg, uint8_t port = 0);
+void    CANSetFilters(uint16_t *ids, uint8_t num);
+void    CANSetFilter(uint16_t id);
+// remap selects GPIO pin pair (0=PA11/PA12, 1=PB5/PB6, 2=PB8/PB9, 3=PB12/PB13).
+bool    CANInit(BITRATE bitrate, int remap);
 
 #endif // CAN_DRIVER
 #endif // CANL431
