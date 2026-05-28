@@ -329,7 +329,7 @@ void CANReceive(CanardCANFrame *CAN_rx_msg, uint8_t /*port*/)
  * @params CAN_tx_msg - CAN message structure for transmission
  *
  */
-void CANSend(const CanardCANFrame *CAN_tx_msg, uint8_t /*port*/)
+bool CANSend(const CanardCANFrame *CAN_tx_msg, uint8_t /*port*/)
 {
     volatile int count = 0;
 
@@ -367,6 +367,7 @@ void CANSend(const CanardCANFrame *CAN_tx_msg, uint8_t /*port*/)
 
     // The mailbox don't becomes empty while loop -- caller can poll
     // CAN1->ESR / MSR / TSR for diagnostics if needed.
+    return true;
 }
 
 /**

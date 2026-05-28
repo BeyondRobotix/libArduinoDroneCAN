@@ -29,7 +29,7 @@ struct PortConfig {
 };
 static const PortConfig kPortConfig[2] = {
     { &fdcan1, PD_0, PD_1 }, // PORT1
-    { &fdcan2, PB_5, PB_6 }, // PORT2 (placeholder pins — verify with schematic)
+    { &fdcan2, PB_5, PB_6 }, // PORT2 — FDCAN2_RX=PB5, FDCAN2_TX=PB6 (AF9)
 };
 
 static uint32_t bitrate_to_hz(BITRATE bitrate) {
@@ -53,8 +53,12 @@ static bool init_port(uint8_t idx, ACANFD_STM32_Settings &settings) {
     return gPorts[idx].initialized;
 }
 
+// "Classic" mode: peripheral runs NORMAL_FD at x4 data rate so it can *receive*
+// FD frames from other nodes (e.g. ArduPilot with UC_OPTION +4). The Classic/FD
+// distinction only affects the per-frame TX canfd flag, not the peripheral config.
 bool CANInit(BITRATE bitrate, uint8_t port) {
-    ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), DataBitRateFactor::x1);
+    ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), DataBitRateFactor::x4);
+    settings.mModuleMode = ACANFD_STM32_Settings::NORMAL_FD;
     if (port == CAN_PORT_BOTH) {
         return init_port(0, settings) & init_port(1, settings);
     }
@@ -72,30 +76,40 @@ bool CANInit_fd(BITRATE bitrate, uint8_t port) {
     return init_port(port, settings);
 }
 
-static void send_on(PortState &p, const CanardCANFrame *tx_msg) {
-    if (!p.initialized || !p.drv || !tx_msg) return;
+// Returns true if the message was accepted by the driver's TX FIFO.
+static bool send_on(PortState &p, const CanardCANFrame *tx_msg) {
+    if (!p.initialized || !p.drv || !tx_msg) return false;
     CANFDMessage message;
     message.ext = true;
     message.id  = tx_msg->id & 0x1FFFFFFFU;
     message.len = tx_msg->data_len;
     memcpy(message.data, tx_msg->data, tx_msg->data_len);
 #if CANARD_ENABLE_CANFD
+    // Temporarily forcing NO_BIT_RATE_SWITCH while diagnosing the 4 Mbps BRS
+    // bus-off issue. FD framing intact, payload stays at nominal bitrate.
+    // Restore to CANFD_WITH_BIT_RATE_SWITCH once the BRS issue is resolved.
     message.type = tx_msg->canfd
                  ? CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH
                  : CANFDMessage::CAN_DATA;
 #else
     message.type = CANFDMessage::CAN_DATA;
 #endif
-    p.drv->tryToSendReturnStatusFD(message);
+    // tryToSendReturnStatusFD returns 0 on success, non-zero on FIFO-full / error.
+    return p.drv->tryToSendReturnStatusFD(message) == 0;
 }
 
-void CANSend(const CanardCANFrame *tx_msg, uint8_t port) {
+bool CANSend(const CanardCANFrame *tx_msg, uint8_t port) {
     if (port == CAN_PORT_BOTH) {
-        send_on(gPorts[0], tx_msg);
-        send_on(gPorts[1], tx_msg);
-    } else if (port <= 1) {
-        send_on(gPorts[port], tx_msg);
+        // For the fan-out case, succeed only if both peripherals accept the frame.
+        // If either fails the caller will retry next cycle.
+        const bool a = send_on(gPorts[0], tx_msg);
+        const bool b = send_on(gPorts[1], tx_msg);
+        return a && b;
     }
+    if (port <= 1) {
+        return send_on(gPorts[port], tx_msg);
+    }
+    return false;
 }
 
 static bool recv_from(PortState &p, CanardCANFrame *rx_msg) {
@@ -130,14 +144,33 @@ void CANReceive(CanardCANFrame *rx_msg, uint8_t port) {
     }
 }
 
+// Edge-triggered bus-off detector. Called from CANMsgAvail() so it's polled
+// every main-loop iteration. ACANFD_STM32::statusFlags() bit 4 = PSR.BO.
+// Prints once when a port enters bus-off and once when it recovers — no spam.
+static void check_bus_off_once(uint8_t idx) {
+    static bool was_bus_off[2] = { false, false };
+    if (!gPorts[idx].initialized || !gPorts[idx].drv) return;
+    const bool bus_off = (gPorts[idx].drv->statusFlags() & (1U << 4)) != 0;
+    if (bus_off != was_bus_off[idx]) {
+        if (Serial) {
+            Serial.print(bus_off ? "CANFD BUS-OFF on PORT" : "CANFD recovered on PORT");
+            Serial.println(idx + 1);
+        }
+        was_bus_off[idx] = bus_off;
+    }
+}
+
 uint8_t CANMsgAvail(uint8_t port) {
     if (port == CAN_PORT_BOTH) {
+        check_bus_off_once(0);
+        check_bus_off_once(1);
         uint8_t n = 0;
         if (gPorts[0].initialized && gPorts[0].drv) n += gPorts[0].drv->availableFD0();
         if (gPorts[1].initialized && gPorts[1].drv) n += gPorts[1].drv->availableFD0();
         return n;
     }
     if (port > 1 || !gPorts[port].initialized || !gPorts[port].drv) return 0;
+    check_bus_off_once(port);
     return gPorts[port].drv->availableFD0();
 }
 

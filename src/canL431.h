@@ -48,7 +48,7 @@ extern CAN_bit_timing_config_t can_configs[6];
 
 // port arg accepted for API parity with H7 drivers but ignored (single CAN port on L4).
 uint8_t CANMsgAvail(uint8_t port = 0);
-void    CANSend(const CanardCANFrame *CAN_tx_msg, uint8_t port = 0);
+bool    CANSend(const CanardCANFrame *CAN_tx_msg, uint8_t port = 0);
 void    CANReceive(CanardCANFrame *CAN_rx_msg, uint8_t port = 0);
 void    CANSetFilters(uint16_t *ids, uint8_t num);
 void    CANSetFilter(uint16_t id);

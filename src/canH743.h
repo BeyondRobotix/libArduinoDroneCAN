@@ -29,7 +29,11 @@ bool CANInit(BITRATE bitrate, uint8_t port = CAN_PORT1);
 bool CANInit_fd(BITRATE bitrate, uint8_t port = CAN_PORT1);
 
 // Send a frame on the given port. BOTH fans out to both peripherals.
-void CANSend(const CanardCANFrame *tx_msg, uint8_t port = CAN_PORT1);
+// Returns true if the peripheral accepted the frame (TX FIFO had room). Returns
+// false if the driver couldn't accept it (FIFO full / bus-off / uninitialised).
+// Callers should not pop the libcanard TX queue when this returns false — retrying
+// later preserves multi-frame transfer atomicity.
+bool CANSend(const CanardCANFrame *tx_msg, uint8_t port = CAN_PORT1);
 
 // Receive one frame from the given port. BOTH drains whichever port has data.
 void CANReceive(CanardCANFrame *rx_msg, uint8_t port = CAN_PORT1);

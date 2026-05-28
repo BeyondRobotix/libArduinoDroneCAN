@@ -73,8 +73,9 @@ bool CANInit_fd(BITRATE bitrate, uint8_t port) {
     return init_port(port, settings);
 }
 
-static void send_on(PortState &p, const CanardCANFrame *tx_msg) {
-    if (!p.initialized || !p.drv || !tx_msg) return;
+// Returns true if the message was accepted by the driver's TX FIFO.
+static bool send_on(PortState &p, const CanardCANFrame *tx_msg) {
+    if (!p.initialized || !p.drv || !tx_msg) return false;
     CANFDMessage message;
     message.ext = true;
     message.id  = tx_msg->id & CAN_EXT_ID_MASK;
@@ -87,16 +88,20 @@ static void send_on(PortState &p, const CanardCANFrame *tx_msg) {
 #else
     message.type = CANFDMessage::CAN_DATA;
 #endif
-    p.drv->tryToSendReturnStatusFD(message);
+    // tryToSendReturnStatusFD returns 0 on success, non-zero on FIFO-full / error.
+    return p.drv->tryToSendReturnStatusFD(message) == 0;
 }
 
-void CANSend(const CanardCANFrame *tx_msg, uint8_t port) {
+bool CANSend(const CanardCANFrame *tx_msg, uint8_t port) {
     if (port == CAN_PORT_BOTH) {
-        send_on(gPorts[0], tx_msg);
-        send_on(gPorts[1], tx_msg);
-    } else if (port <= 1) {
-        send_on(gPorts[port], tx_msg);
+        const bool a = send_on(gPorts[0], tx_msg);
+        const bool b = send_on(gPorts[1], tx_msg);
+        return a && b;
     }
+    if (port <= 1) {
+        return send_on(gPorts[port], tx_msg);
+    }
+    return false;
 }
 
 static bool recv_from(PortState &p, CanardCANFrame *rx_msg) {

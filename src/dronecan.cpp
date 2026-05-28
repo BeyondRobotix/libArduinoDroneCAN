@@ -1009,7 +1009,13 @@ void DroneCAN::processTx()
     const uint8_t port = (uint8_t)port_;
     for (const CanardCANFrame *txf = NULL; (txf = canardPeekTxQueue(&canard)) != NULL;)
     {
-        CANSend(txf, port);
+        if (!CANSend(txf, port))
+        {
+            // Driver couldn't accept the frame (TX FIFO full / bus-off);
+            // leave it queued and retry next cycle so multi-frame transfers
+            // don't end up split across the bus with missing intermediate frames.
+            break;
+        }
         canardPopTxQueue(&canard);
     }
 }
