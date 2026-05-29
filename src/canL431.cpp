@@ -331,23 +331,21 @@ void CANReceive(CanardCANFrame *CAN_rx_msg, uint8_t /*port*/)
  */
 bool CANSend(const CanardCANFrame *CAN_tx_msg, uint8_t /*port*/)
 {
-    volatile int count = 0;
+    // Mailbox 0 only: bxCAN with TXFP=0 (MCR=0x41 in CANInit) arbitrates
+    // equal-ID frames by mailbox number, not insertion order. DroneCAN
+    // multi-frame transfers share one CAN ID and must stay strictly ordered on
+    // the wire, so spreading them across mailboxes reorders frames and breaks
+    // reassembly (toggle/CRC mismatch). Using a single mailbox guarantees order.
+    if (!(CAN1->TSR & (1U << 26)))   // TME0: TX mailbox 0 empty?
+    {
+        // Mailbox still transmitting the previous frame. Don't block; report
+        // failure so processTx() leaves this frame queued and retries next cycle.
+        return false;
+    }
 
-    uint32_t out = 0;
-    // if ((CAN_tx_msg->id & STM32_CAN_RIR_IDE) == 0)
-    // {
-    //     // standard frame format
-    //     out = ((CAN_tx_msg->id & CAN_STD_ID_MASK) << 21U);
-    // }
-    // else
-    // {
-    // extended frame format
-    // force extended frame format
-    out = ((CAN_tx_msg->id & CAN_EXT_ID_MASK) << 3U) | STM32_CAN_TIR_IDE;
-    // }
+    const uint32_t out = ((CAN_tx_msg->id & CAN_EXT_ID_MASK) << 3U) | STM32_CAN_TIR_IDE;
 
-    CAN1->sTxMailBox[0].TDTR &= ~(0xF);
-    CAN1->sTxMailBox[0].TDTR |= CAN_tx_msg->data_len & 0xFUL;
+    CAN1->sTxMailBox[0].TDTR = (CAN1->sTxMailBox[0].TDTR & ~0xFUL) | (CAN_tx_msg->data_len & 0xFUL);
 
     CAN1->sTxMailBox[0].TDLR = (((uint32_t)CAN_tx_msg->data[3] << 24) |
                                 ((uint32_t)CAN_tx_msg->data[2] << 16) |
@@ -358,15 +356,8 @@ bool CANSend(const CanardCANFrame *CAN_tx_msg, uint8_t /*port*/)
                                 ((uint32_t)CAN_tx_msg->data[5] << 8) |
                                 ((uint32_t)CAN_tx_msg->data[4]));
 
-    // Send Go
+    // Request transmission (non-blocking; the peripheral handles arbitration).
     CAN1->sTxMailBox[0].TIR = out | STM32_CAN_TIR_TXRQ;
-
-    // Wait until the mailbox is empty
-    while (CAN1->sTxMailBox[0].TIR & 0x1UL && count++ < 1000000)
-        ;
-
-    // The mailbox don't becomes empty while loop -- caller can poll
-    // CAN1->ESR / MSR / TSR for diagnostics if needed.
     return true;
 }
 
