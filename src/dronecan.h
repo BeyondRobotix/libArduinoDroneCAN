@@ -113,11 +113,23 @@ public:
 
     /*
         Selects the wire format on H7 boards. Classic = CAN 2.0B (8-byte payload);
-        FD = CANFD (up to 64 bytes, 4x data bitrate). FD requires a board JSON
-        that defines -DCANARD_ENABLE_CANFD=1 (CoreNode / MicroNodePlus); on L431
-        the #error above blocks the FD build entirely.
+        FDnX = CANFD (up to 64 bytes) with the data phase at n x the 1 Mbps
+        arbitration bitrate — pick the variant matching the autopilot's
+        CAN_Px_FDBITRATE (4 -> FD4X, 8 -> FD8X). FD is a back-compat alias for
+        FD4X. FD modes require a board JSON that defines
+        -DCANARD_ENABLE_CANFD=1 (CoreNode / MicroNodePlus); on L431 the #error
+        above blocks the FD build entirely.
+
+        Enumerator values encode the data-phase multiplier — keep them in sync
+        with ACANFD's DataBitRateFactor (x1..x10).
     */
-    enum class CanMode { Classic, FD };
+    enum class CanMode : uint8_t {
+        Classic = 0,
+        FD2X    = 2,
+        FD4X    = 4,
+        FD8X    = 8,
+        FD      = FD4X,
+    };
 
     /*
         Selects which physical CAN port this instance runs on (H7 only).

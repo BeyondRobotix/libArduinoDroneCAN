@@ -45,10 +45,22 @@ static uint32_t bitrate_to_hz(BITRATE bitrate) {
     return 1000000;
 }
 
+// Wrapper-level begin_status: the FDCAN kernel clock cannot hit the requested
+// bitrates within tolerance (settings.mBitSettingOk). Distinct from the
+// driver's beginFD() error flags, which never reach bit 31.
+static const uint32_t kBitTimingOutOfTolerance = 1UL << 31;
+
 static bool init_port(uint8_t idx, ACANFD_STM32_Settings &settings) {
+    gPorts[idx].drv = kPortConfig[idx].drv;
+    if (!settings.mBitSettingOk) {
+        // Refuse to start with off-frequency bit timing: it passes the driver's
+        // range checks but produces bit errors / bus-off on a real bus.
+        gPorts[idx].begin_status = kBitTimingOutOfTolerance;
+        gPorts[idx].initialized  = false;
+        return false;
+    }
     settings.mRxPin = kPortConfig[idx].rx_pin;
     settings.mTxPin = kPortConfig[idx].tx_pin;
-    gPorts[idx].drv = kPortConfig[idx].drv;
     gPorts[idx].begin_status = gPorts[idx].drv->beginFD(settings);
     gPorts[idx].initialized  = (gPorts[idx].begin_status == 0);
     return gPorts[idx].initialized;
@@ -63,8 +75,9 @@ bool CANInit(BITRATE bitrate, uint8_t port) {
     return init_port(port, settings);
 }
 
-bool CANInit_fd(BITRATE bitrate, uint8_t port) {
-    ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), DataBitRateFactor::x4);
+bool CANInit_fd(BITRATE bitrate, uint8_t port, uint8_t data_factor) {
+    if (data_factor < 1 || data_factor > 10) data_factor = 4;
+    ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), DataBitRateFactor(data_factor));
     settings.mModuleMode = ACANFD_STM32_Settings::NORMAL_FD;
     if (port == CAN_PORT_BOTH) {
         return init_port(0, settings) & init_port(1, settings);

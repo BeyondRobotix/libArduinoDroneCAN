@@ -22,8 +22,12 @@ static constexpr uint8_t CAN_PORT1      = 0;
 static constexpr uint8_t CAN_PORT2      = 1;
 static constexpr uint8_t CAN_PORT_BOTH  = 2;
 
-bool    CANInit(BITRATE bitrate, uint8_t port = CAN_PORT1);
-bool    CANInit_fd(BITRATE bitrate, uint8_t port = CAN_PORT1);
+// data_factor = data-phase bitrate multiplier over the arbitration bitrate
+// (matches ArduPilot CAN_Px_FDBITRATE: 4 -> 4 Mbps, 8 -> 8 Mbps at 1 Mbps arb).
+// CANInit also takes it because the peripheral always runs NORMAL_FD: the
+// data timing must match the bus to receive other nodes' FD frames.
+bool    CANInit(BITRATE bitrate, uint8_t port = CAN_PORT1, uint8_t data_factor = 4);
+bool    CANInit_fd(BITRATE bitrate, uint8_t port = CAN_PORT1, uint8_t data_factor = 4);
 // Returns true if the frame was accepted by the peripheral (TX FIFO had room).
 // Returns false if the driver could not accept the frame (TX FIFO full, bus-off,
 // uninitialised port). Callers should not pop the libcanard TX queue when this

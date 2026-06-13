@@ -7,14 +7,17 @@ static bool dronecan_can_init(DroneCAN::CanMode mode, uint8_t port)
 #ifdef CANL431
     (void)port; // L431 has one fixed CAN port wired at remap=2 (PB8/PB9)
 #if CANARD_ENABLE_CANFD
-    if (mode == DroneCAN::CanMode::FD) return CANInit_fd(CAN_1000KBPS, 2);
+    if (mode != DroneCAN::CanMode::Classic) return CANInit_fd(CAN_1000KBPS, 2);
 #else
     (void)mode;
 #endif
     return CANInit(CAN_1000KBPS, 2);
 #else
 #if CANARD_ENABLE_CANFD
-    if (mode == DroneCAN::CanMode::FD) return CANInit_fd(CAN_1000KBPS, port);
+    // CanMode enumerator values encode the data-phase bitrate multiplier.
+    if (mode != DroneCAN::CanMode::Classic) {
+        return CANInit_fd(CAN_1000KBPS, port, (uint8_t)mode);
+    }
 #else
     (void)mode;
 #endif
@@ -37,7 +40,7 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
     storage_page_ = (storage_page >= 0)
                   ? (uint32_t)storage_page
                   : DroneCAN_Storage::default_page((uint8_t)port);
-    canfd_default_ = (mode == CanMode::FD);
+    canfd_default_ = (mode != CanMode::Classic);
     dronecan_can_init(mode, (uint8_t)port);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
@@ -112,7 +115,7 @@ void DroneCAN::init(const std::vector<parameter> &param_list,
     storage_page_ = (storage_page >= 0)
                   ? (uint32_t)storage_page
                   : DroneCAN_Storage::default_page((uint8_t)port);
-    canfd_default_ = (mode == CanMode::FD);
+    canfd_default_ = (mode != CanMode::Classic);
     dronecan_can_init(mode, (uint8_t)port);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
@@ -166,7 +169,7 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
 {
     port_          = port;
     storage_page_  = DroneCAN_Storage::default_page((uint8_t)port);
-    canfd_default_ = (mode == CanMode::FD);
+    canfd_default_ = (mode != CanMode::Classic);
     dronecan_can_init(mode, (uint8_t)port);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
