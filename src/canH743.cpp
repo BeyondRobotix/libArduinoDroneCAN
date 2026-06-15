@@ -12,7 +12,9 @@
 
 #define CAN_EXT_ID_MASK 0x1FFFFFFFU
 
-// Per-port driver state. Index 0 = PORT1 (FDCAN2 on CoreNode), index 1 = PORT2 (FDCAN1).
+// Per-port driver state. Index 0 = PORT1 (FDCAN1 = physical CAN1),
+// index 1 = PORT2 (FDCAN2 = physical CAN2). Matches MicroNodePlus, where
+// PORT1 is also FDCAN1.
 struct PortState {
     ACANFD_STM32 *drv          = nullptr;
     uint32_t      begin_status = 0xFFFF;
@@ -20,17 +22,21 @@ struct PortState {
 };
 static PortState gPorts[2];
 
-// Map port index to driver instance + pin pair.
-// PORT1: FDCAN2 at PB_5 (RX) / PB_6 (TX) — today's production wiring on CoreNode.
-// PORT2: FDCAN1 at PB_8 (RX) / PB_9 (TX) — placeholder; confirm from board schematic.
+// Map port index to driver instance + pin pair. Port number tracks the silk
+// label: PORT1 = CoreNode connector "CAN1", PORT2 = "CAN2".
+// PORT1: FDCAN1 at PH_14 (RX) / PD_1 (TX) — physical CAN1 connector.
+//   (Earlier PB_8/PB_9 placeholders were wrong — FDCAN1 routes to PD1/PH14 here,
+//    verified on hardware; PH_14 was added to fdcan1_rx_pin_array in the H743
+//    objects header.)
+// PORT2: FDCAN2 at PB_5 (RX) / PB_6 (TX) — physical CAN2 connector.
 struct PortConfig {
     ACANFD_STM32 *drv;
     uint32_t      rx_pin;
     uint32_t      tx_pin;
 };
 static const PortConfig kPortConfig[2] = {
-    { &fdcan2, PB_5, PB_6 }, // PORT1
-    { &fdcan1, PB_8, PB_9 }, // PORT2 (placeholder pins — verify with schematic)
+    { &fdcan1, PH_14, PD_1 }, // PORT1 — physical CAN1 (FDCAN1)
+    { &fdcan2, PB_5,  PB_6 }, // PORT2 — physical CAN2 (FDCAN2)
 };
 
 static uint32_t bitrate_to_hz(BITRATE bitrate) {
@@ -151,14 +157,42 @@ void CANReceive(CanardCANFrame *rx_msg, uint8_t port) {
     }
 }
 
+// Edge-triggered bus-off detector + recovery. Called from CANMsgAvail() so it's
+// polled every main-loop iteration. ACANFD_STM32::statusFlags() bit 4 = PSR.BO.
+// Prints once when a port enters bus-off and once when it recovers — no spam.
+// M_CAN parks in INIT after bus-off and stays off the bus until software
+// restarts it; retry recovery at 1 Hz so a transient bus fault doesn't take the
+// node offline until reboot, without storming a bus whose fault persists.
+// (Ported from canH723.cpp.)
+static void check_bus_off_once(uint8_t idx) {
+    static bool was_bus_off[2] = { false, false };
+    static uint32_t last_recover_ms[2] = { 0, 0 };
+    if (!gPorts[idx].initialized || !gPorts[idx].drv) return;
+    const bool bus_off = (gPorts[idx].drv->statusFlags() & (1U << 4)) != 0;
+    if (bus_off != was_bus_off[idx]) {
+        if (Serial) {
+            Serial.print(bus_off ? "CANFD BUS-OFF on PORT" : "CANFD recovered on PORT");
+            Serial.println(idx + 1);
+        }
+        was_bus_off[idx] = bus_off;
+    }
+    if (bus_off && (millis() - last_recover_ms[idx]) >= 1000U) {
+        gPorts[idx].drv->recoverFromBusOff();
+        last_recover_ms[idx] = millis();
+    }
+}
+
 uint8_t CANMsgAvail(uint8_t port) {
     if (port == CAN_PORT_BOTH) {
+        check_bus_off_once(0);
+        check_bus_off_once(1);
         uint8_t n = 0;
         if (gPorts[0].initialized && gPorts[0].drv) n += gPorts[0].drv->driverReceiveFIFO0Count();
         if (gPorts[1].initialized && gPorts[1].drv) n += gPorts[1].drv->driverReceiveFIFO0Count();
         return n;
     }
     if (port > 1 || !gPorts[port].initialized || !gPorts[port].drv) return 0;
+    check_bus_off_once(port);
     return gPorts[port].drv->driverReceiveFIFO0Count();
 }
 

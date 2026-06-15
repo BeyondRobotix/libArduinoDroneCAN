@@ -20,9 +20,10 @@ inline uint32_t fdcanClock (void) {
   //--- Reset CAN peripherals
     __HAL_RCC_FDCAN_FORCE_RESET () ;
     __HAL_RCC_FDCAN_RELEASE_RESET () ;
-  //--- Select CAN clock: PLL1Q (120 MHz on CoreNode, divides exactly to
-  //    1 Mbps arbitration and 4 Mbps CAN-FD data)
-    LL_RCC_SetFDCANClockSource (LL_RCC_FDCAN_CLKSOURCE_PLL1Q) ;
+  //--- Select CAN clock: PLL2Q (96 MHz on CoreNode). 96 MHz divides into
+  //    1/2/4/8 Mbps with prescaler 1, which CAN-FD's TDC needs; PLL1Q (120 MHz)
+  //    forces BRP=2 at 2 Mbps. Matches MicroNodePlus (also PLL2Q).
+    LL_RCC_SetFDCANClockSource (LL_RCC_FDCAN_CLKSOURCE_PLL2Q) ;
   }
   return LL_RCC_GetFDCANClockFreq (LL_RCC_FDCAN_CLKSOURCE) ;
 }
