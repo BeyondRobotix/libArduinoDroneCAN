@@ -170,6 +170,19 @@ class ACANFD_STM32 {
 //  Bit 4 : bus off
   public: uint32_t statusFlags (void) const ;
 
+//--- Bus-off recovery. On bus-off, M_CAN sets CCCR.INIT and stays off the bus
+//    until software clears it (ISO 11898-1 requires software-controlled
+//    recovery). Clearing INIT starts the recovery sequence (129 occurrences
+//    of 11 consecutive recessive bits). Returns true if recovery was started.
+  public: inline bool recoverFromBusOff (void) {
+    if (((mPeripheralPtr->PSR & FDCAN_PSR_BO) != 0)
+     && ((mPeripheralPtr->CCCR & FDCAN_CCCR_INIT) != 0)) {
+      mPeripheralPtr->CCCR &= ~FDCAN_CCCR_INIT ;
+      return true ;
+    }
+    return false ;
+  }
+
 //--- Bus Status
   public: inline BusStatus getStatus (void) const { return BusStatus (mPeripheralPtr) ; }
 

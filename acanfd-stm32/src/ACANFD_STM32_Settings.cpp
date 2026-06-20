@@ -123,10 +123,13 @@ mDataBitRateFactor (inDataBitRateFactor) {
 //--- Set RJW to PS2
   mDataSJW = mDataPhaseSegment2 ;
 //-------------------------- Set TDCO
-  mTransceiverDelayCompensation = (dataBitRate <= 1'000'000)
-    ? 0
-    : ((mBitRatePrescaler * bestDataTQCount) / 2)
-  ;
+//--- ST/Bosch recommendation: place the secondary sample point at the data
+//    phase sample point, i.e. TDCO = DBRP * (1 + DTSEG1), in kernel clock periods
+  uint32_t tdco = mBitRatePrescaler * (1 + mDataPhaseSegment1) ;
+  if (tdco > MAX_TRANSCEIVER_DELAY_COMPENSATION) {
+    tdco = MAX_TRANSCEIVER_DELAY_COMPENSATION ;
+  }
+  mTransceiverDelayCompensation = (dataBitRate <= 1'000'000) ? 0 : tdco ;
 //-------------------------- Set Arbitration segment lengthes
   const uint32_t bestArbitrationTQCount = bestDataTQCount * uint32_t (inDataBitRateFactor) ;
 //--- Compute PS1

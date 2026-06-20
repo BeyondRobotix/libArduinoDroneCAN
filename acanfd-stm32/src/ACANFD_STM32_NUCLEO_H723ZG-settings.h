@@ -20,10 +20,11 @@ inline uint32_t fdcanClock (void) {
   //--- Reset CAN peripherals
     __HAL_RCC_FDCAN_FORCE_RESET () ;
     __HAL_RCC_FDCAN_RELEASE_RESET () ;
-  //--- Select CAN clock
-    LL_RCC_SetFDCANClockSource (LL_RCC_FDCAN_CLKSOURCE_PLL1Q) ;
+  //--- Select CAN clock: PLL2Q (96 MHz on MicroNodePlus). PLL1Q is 137.5 MHz,
+  //    which cannot divide to an exact 4 Mbps CAN-FD data phase.
+    LL_RCC_SetFDCANClockSource (LL_RCC_FDCAN_CLKSOURCE_PLL2Q) ;
   }
-  return HAL_RCC_GetPCLK1Freq () ;
+  return LL_RCC_GetFDCANClockFreq (LL_RCC_FDCAN_CLKSOURCE) ;
 }
 
 //------------------------------------------------------------------------------

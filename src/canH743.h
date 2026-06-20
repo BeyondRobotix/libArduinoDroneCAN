@@ -25,8 +25,10 @@ static constexpr uint8_t CAN_PORT_BOTH = 2;
 // Classic CAN init for the given port.
 bool CANInit(BITRATE bitrate, uint8_t port = CAN_PORT1);
 
-// CAN-FD init (NORMAL_FD, 4x data rate) for the given port.
-bool CANInit_fd(BITRATE bitrate, uint8_t port = CAN_PORT1);
+// CAN-FD init (NORMAL_FD) for the given port. data_factor = data-phase bitrate
+// multiplier over the arbitration bitrate (matches ArduPilot CAN_Px_FDBITRATE:
+// 4 -> 4 Mbps, 8 -> 8 Mbps at 1 Mbps arb).
+bool CANInit_fd(BITRATE bitrate, uint8_t port = CAN_PORT1, uint8_t data_factor = 4);
 
 // Send a frame on the given port. BOTH fans out to both peripherals.
 // Returns true if the peripheral accepted the frame (TX FIFO had room). Returns

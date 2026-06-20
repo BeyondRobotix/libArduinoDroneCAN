@@ -24,8 +24,9 @@ const std::initializer_list <ACANFD_STM32::PinPort> fdcan1_tx_pin_array{
 
 const std::initializer_list <ACANFD_STM32::PinPort> fdcan1_rx_pin_array {
   ACANFD_STM32::PinPort (PD_0,  9), // Rx Pin: PD_0, AF9
-  ACANFD_STM32::PinPort (PB_8,  9), // Rx Pin: PB_9, AF9
-  ACANFD_STM32::PinPort (PA_11, 9)  // Rx Pin: PA_11, AF9
+  ACANFD_STM32::PinPort (PB_8,  9), // Rx Pin: PB_8, AF9
+  ACANFD_STM32::PinPort (PA_11, 9), // Rx Pin: PA_11, AF9
+  ACANFD_STM32::PinPort (PH_14, 9)  // Rx Pin: PH_14, AF9 (CoreNode CAN1 connector)
 } ;
 
 //------------------------------------------------------------------------------

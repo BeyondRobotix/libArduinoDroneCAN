@@ -32,6 +32,13 @@ static const PortConfig kPortConfig[2] = {
     { &fdcan2, PB_5, PB_6 }, // PORT2 — FDCAN2_RX=PB5, FDCAN2_TX=PB6 (AF9)
 };
 
+// Data-phase multiplier → ACANFD factor enum (whose values are the multiplier).
+// Out-of-range values fall back to x4, the DroneCAN-on-FD common default.
+static DataBitRateFactor data_factor_from(uint8_t factor) {
+    if (factor < 1 || factor > 10) factor = 4;
+    return DataBitRateFactor(factor);
+}
+
 static uint32_t bitrate_to_hz(BITRATE bitrate) {
     switch (bitrate) {
         case CAN_50KBPS:   return  50000;
@@ -44,10 +51,22 @@ static uint32_t bitrate_to_hz(BITRATE bitrate) {
     return 1000000;
 }
 
+// Wrapper-level begin_status: the FDCAN kernel clock cannot hit the requested
+// bitrates within tolerance (settings.mBitSettingOk). Distinct from the
+// driver's beginFD() error flags, which never reach bit 31.
+static const uint32_t kBitTimingOutOfTolerance = 1UL << 31;
+
 static bool init_port(uint8_t idx, ACANFD_STM32_Settings &settings) {
+    gPorts[idx].drv = kPortConfig[idx].drv;
+    if (!settings.mBitSettingOk) {
+        // Refuse to start with off-frequency bit timing: it passes the driver's
+        // range checks but produces bit errors / bus-off on a real bus.
+        gPorts[idx].begin_status = kBitTimingOutOfTolerance;
+        gPorts[idx].initialized  = false;
+        return false;
+    }
     settings.mRxPin = kPortConfig[idx].rx_pin;
     settings.mTxPin = kPortConfig[idx].tx_pin;
-    gPorts[idx].drv = kPortConfig[idx].drv;
     gPorts[idx].begin_status = gPorts[idx].drv->beginFD(settings);
     gPorts[idx].initialized  = (gPorts[idx].begin_status == 0);
     return gPorts[idx].initialized;
@@ -56,8 +75,8 @@ static bool init_port(uint8_t idx, ACANFD_STM32_Settings &settings) {
 // "Classic" mode: peripheral runs NORMAL_FD at x4 data rate so it can *receive*
 // FD frames from other nodes (e.g. ArduPilot with UC_OPTION +4). The Classic/FD
 // distinction only affects the per-frame TX canfd flag, not the peripheral config.
-bool CANInit(BITRATE bitrate, uint8_t port) {
-    ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), DataBitRateFactor::x4);
+bool CANInit(BITRATE bitrate, uint8_t port, uint8_t data_factor) {
+    ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), data_factor_from(data_factor));
     settings.mModuleMode = ACANFD_STM32_Settings::NORMAL_FD;
     if (port == CAN_PORT_BOTH) {
         return init_port(0, settings) & init_port(1, settings);
@@ -66,8 +85,8 @@ bool CANInit(BITRATE bitrate, uint8_t port) {
     return init_port(port, settings);
 }
 
-bool CANInit_fd(BITRATE bitrate, uint8_t port) {
-    ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), DataBitRateFactor::x4);
+bool CANInit_fd(BITRATE bitrate, uint8_t port, uint8_t data_factor) {
+    ACANFD_STM32_Settings settings(bitrate_to_hz(bitrate), data_factor_from(data_factor));
     settings.mModuleMode = ACANFD_STM32_Settings::NORMAL_FD;
     if (port == CAN_PORT_BOTH) {
         return init_port(0, settings) & init_port(1, settings);
@@ -85,9 +104,6 @@ static bool send_on(PortState &p, const CanardCANFrame *tx_msg) {
     message.len = tx_msg->data_len;
     memcpy(message.data, tx_msg->data, tx_msg->data_len);
 #if CANARD_ENABLE_CANFD
-    // Temporarily forcing NO_BIT_RATE_SWITCH while diagnosing the 4 Mbps BRS
-    // bus-off issue. FD framing intact, payload stays at nominal bitrate.
-    // Restore to CANFD_WITH_BIT_RATE_SWITCH once the BRS issue is resolved.
     message.type = tx_msg->canfd
                  ? CANFDMessage::CANFD_WITH_BIT_RATE_SWITCH
                  : CANFDMessage::CAN_DATA;
@@ -149,6 +165,7 @@ void CANReceive(CanardCANFrame *rx_msg, uint8_t port) {
 // Prints once when a port enters bus-off and once when it recovers — no spam.
 static void check_bus_off_once(uint8_t idx) {
     static bool was_bus_off[2] = { false, false };
+    static uint32_t last_recover_ms[2] = { 0, 0 };
     if (!gPorts[idx].initialized || !gPorts[idx].drv) return;
     const bool bus_off = (gPorts[idx].drv->statusFlags() & (1U << 4)) != 0;
     if (bus_off != was_bus_off[idx]) {
@@ -157,6 +174,13 @@ static void check_bus_off_once(uint8_t idx) {
             Serial.println(idx + 1);
         }
         was_bus_off[idx] = bus_off;
+    }
+    // M_CAN parks in INIT after bus-off and stays off the bus until software
+    // restarts it. Retry at 1 Hz so a transient bus fault doesn't take the
+    // node offline until reboot, without storming a bus whose fault persists.
+    if (bus_off && (millis() - last_recover_ms[idx]) >= 1000U) {
+        gPorts[idx].drv->recoverFromBusOff();
+        last_recover_ms[idx] = millis();
     }
 }
 
