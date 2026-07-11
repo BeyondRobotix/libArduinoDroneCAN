@@ -54,8 +54,10 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
                shouldAcceptTransfer,
                NULL);
 
-    // initialise the internal LED
-    pinMode(19, OUTPUT);
+    // initialise the internal LED (configurable via set_cycle_led_pin)
+    if (cycle_led_pin >= 0) {
+        pinMode(cycle_led_pin, OUTPUT);
+    }
 
     IWatchdog.reload();
 
@@ -129,8 +131,10 @@ void DroneCAN::init(const std::vector<parameter> &param_list,
                DroneCAN_should_accept_adapter,
                this);
 
-    // initialise the internal LED
-    pinMode(19, OUTPUT);
+    // initialise the internal LED (configurable via set_cycle_led_pin)
+    if (cycle_led_pin >= 0) {
+        pinMode(cycle_led_pin, OUTPUT);
+    }
 
     IWatchdog.reload();
 

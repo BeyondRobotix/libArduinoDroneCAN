@@ -17,7 +17,10 @@ enum BITRATE
 
 // Port selectors — values match DroneCAN::CanPort (0=PORT1, 1=PORT2, 2=BOTH).
 // PORT1 on MicroNodePlus = FDCAN1 (today's wiring, PD_0/PD_1).
-// PORT2 on MicroNodePlus = FDCAN2 (placeholder pins PB_5/PB_6 — confirm from schematic).
+// PORT2 on MicroNodePlus = FDCAN2 (PB_5 RX / PB_6 TX). Confirmed against the
+// "Micro Node Plus Attempt 2" production schematic via ST's CubeMX pin
+// database for STM32H723VGHx (TFBGA100): net /CAN2_RX = ball C5 = PB5
+// (FDCAN2_RX), net /CAN2_TX = ball B5 = PB6 (FDCAN2_TX).
 static constexpr uint8_t CAN_PORT1      = 0;
 static constexpr uint8_t CAN_PORT2      = 1;
 static constexpr uint8_t CAN_PORT_BOTH  = 2;

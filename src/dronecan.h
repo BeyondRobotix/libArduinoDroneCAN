@@ -253,19 +253,29 @@ public:
 
     /*
         Pin toggled at 1 Hz inside cycle() as an "alive" heartbeat. Defaults to
-        pin 19 (MicroNode's on-board LED) for backwards compatibility. Set to
-        -1 to disable -- needed by callers that want to drive the LED with
-        their own state machine (e.g. bootloader update progress / error
-        patterns).
+        the variant's LED_BUILTIN (MicroNode: 19/PB3, MicroNodePlus: PB0);
+        disabled on boards whose variant names no LED. Set to -1 to disable --
+        needed by callers that want to drive the LED with their own state
+        machine (e.g. bootloader update progress / error patterns).
     */
-    void set_cycle_led_pin(int pin) { cycle_led_pin = pin; }
+    void set_cycle_led_pin(int pin)
+    {
+        cycle_led_pin = pin;
+        if (pin >= 0) {
+            pinMode(pin, OUTPUT);
+        }
+    }
 
 private:
     bool     node_status_override_active = false;
     uint8_t  node_status_override_health = 0;
     uint8_t  node_status_override_mode   = 0;
     uint16_t node_status_override_vssc   = 0;
-    int      cycle_led_pin = 19;
+#if defined(LED_BUILTIN) && (LED_BUILTIN != PNUM_NOT_DEFINED)
+    int      cycle_led_pin = LED_BUILTIN;
+#else
+    int      cycle_led_pin = -1;
+#endif
     bool     canfd_default_ = false;
     CanPort  port_          = CanPort::PORT1;
     uint32_t storage_page_  = 0; // resolved by init() from the storage_page arg
