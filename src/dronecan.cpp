@@ -366,29 +366,47 @@ void DroneCAN::handle_param_GetSet(CanardRxTransfer *transfer)
 
     IWatchdog.reload();
 
-    // If it's a _set_ request, apply the new value
+    // If it's a _set_ request, apply the new value to RAM only. We deliberately
+    // do NOT persist to flash here: on H7 a page erase blocks for seconds with
+    // interrupts disabled, which stalls the GetSet response past the requester's
+    // service timeout (and can trip the watchdog). Persistence is the job of
+    // ExecuteOpcode(SAVE) -- see handle_param_ExecuteOpcode() -- which the GUI's
+    // "Store all params" action triggers.
     if (idx != SIZE_MAX && req.value.union_tag != UAVCAN_PROTOCOL_PARAM_VALUE_EMPTY)
     {
         auto &p = parameters[idx];
-        float new_value = 0.0f;
-        switch (p.type)
+        float set_value = 0.0f;
+        bool valid = true;
+
+        switch (req.value.union_tag)  // read the union member the requester actually populated
         {
         case UAVCAN_PROTOCOL_PARAM_VALUE_INTEGER_VALUE:
-            new_value = req.value.integer_value;
+            set_value = req.value.integer_value;
             break;
         case UAVCAN_PROTOCOL_PARAM_VALUE_REAL_VALUE:
-            new_value = req.value.real_value;
+            set_value = req.value.real_value;
             break;
         case UAVCAN_PROTOCOL_PARAM_VALUE_BOOLEAN_VALUE:
-            new_value = (req.value.boolean_value) ? 1.0f : 0.0f;
+            set_value = (req.value.boolean_value) ? 1.0f : 0.0f;
             break;
         default:
-            // unsupported type
+            valid = false;  // unsupported type - leave the value untouched
             break;
         }
 
-        // Use helper to validate, set, and persist
-        setParameterByIndex(idx, new_value);
+        if (valid)
+        {
+            // Clamp against min/max constraints, then update RAM
+            if (set_value < p.min_value)
+            {
+                set_value = p.min_value;
+            }
+            else if (set_value > p.max_value)
+            {
+                set_value = p.max_value;
+            }
+            p.value = set_value;
+        }
     }
 
     IWatchdog.reload();
@@ -495,6 +513,61 @@ void DroneCAN::handle_param_ExecuteOpcode(CanardRxTransfer *transfer)
 #endif
     };
     canardRequestOrRespondObj(&canard, transfer->source_node_id, &transfer_object);
+}
+
+/*
+    handle a RestartNode request. Validates the magic number, sends an
+    ACK (RestartNode.Response) addressed back to the requester, flushes it
+    to the wire, and only then resets. A response with ok=false is returned
+    (and the node keeps running) if the magic number is wrong.
+*/
+void DroneCAN::handle_RestartNode(CanardRxTransfer *transfer)
+{
+    struct uavcan_protocol_RestartNodeRequest req;
+    bool ok = false;
+    if (uavcan_protocol_RestartNodeRequest_decode(transfer, &req) == 0)
+    {
+        ok = (req.magic_number == UAVCAN_PROTOCOL_RESTARTNODE_REQUEST_MAGIC_NUMBER);
+    }
+
+    uavcan_protocol_RestartNodeResponse pkt{};
+    pkt.ok = ok;
+
+    uint8_t buffer[UAVCAN_PROTOCOL_RESTARTNODE_RESPONSE_MAX_SIZE];
+    uint16_t len = uavcan_protocol_RestartNodeResponse_encode(&pkt, buffer
+        CANARD_TAO_ENCODE_ARG(!canfd_default_)
+    );
+    CanardTxTransfer transfer_object = {
+        .transfer_type = CanardTransferTypeResponse,
+        .data_type_signature = UAVCAN_PROTOCOL_RESTARTNODE_SIGNATURE,
+        .data_type_id = UAVCAN_PROTOCOL_RESTARTNODE_ID,
+        .inout_transfer_id = &transfer->transfer_id,
+        .priority = transfer->priority,
+        .payload = &buffer[0],
+        .payload_len = len,
+#if CANARD_ENABLE_CANFD
+        .canfd = canfd_default_,
+#endif
+    };
+    canardRequestOrRespondObj(&canard, transfer->source_node_id, &transfer_object);
+
+    if (!ok)
+    {
+        // Bad magic: we've ACKed with ok=false; do not reset.
+        return;
+    }
+
+    // Push the ACK out before resetting -- canardRequestOrRespondObj only
+    // queues the frames; NVIC_SystemReset() would drop them otherwise.
+    uint8_t count = 50;
+    while (count--)
+    {
+        processTx();
+        delay(1);
+    }
+
+    if (Serial) Serial.println("Reset..");
+    NVIC_SystemReset();
 }
 
 /*
@@ -1106,32 +1179,8 @@ void DroneCANonTransferReceived(DroneCAN &dronecan, CanardInstance *ins, CanardR
         }
         case UAVCAN_PROTOCOL_RESTARTNODE_ID:
         {
-
-            uavcan_protocol_RestartNodeResponse pkt{};
-            pkt.ok = true;
-            uint8_t buffer[UAVCAN_PROTOCOL_RESTARTNODE_RESPONSE_MAX_SIZE];
-            uint32_t len = uavcan_protocol_RestartNodeResponse_encode(&pkt, buffer
-                CANARD_TAO_ENCODE_ARG(!dronecan.canfd_default())
-            );
-            static uint8_t transfer_id;
-            CanardTxTransfer transfer_object = {
-                .transfer_type = CanardTransferTypeBroadcast,
-                .data_type_signature = UAVCAN_PROTOCOL_RESTARTNODE_RESPONSE_SIGNATURE,
-                .data_type_id = UAVCAN_PROTOCOL_RESTARTNODE_RESPONSE_ID,
-                .inout_transfer_id = &transfer_id,
-                .priority = CANARD_TRANSFER_PRIORITY_LOW,
-                .payload = buffer,
-                .payload_len = (uint16_t)len,
-#if CANARD_ENABLE_CANFD
-                .canfd = dronecan.canfd_default(),
-#endif
-            };
-            canardBroadcastObj(ins, &transfer_object);
-
-            if (Serial) Serial.println("Reset..");
-            delay(200);
-            // yeeeeeet
-            NVIC_SystemReset();
+            dronecan.handle_RestartNode(transfer);
+            break;
         }
         case UAVCAN_PROTOCOL_PARAM_GETSET_ID:
         {
@@ -1193,7 +1242,7 @@ bool DroneCANshouldAcceptTransfer(const CanardInstance *ins,
         }
         case UAVCAN_PROTOCOL_RESTARTNODE_ID:
         {
-            *out_data_type_signature = UAVCAN_PROTOCOL_RESTARTNODE_ID;
+            *out_data_type_signature = UAVCAN_PROTOCOL_RESTARTNODE_SIGNATURE;
             return true;
         }
         }

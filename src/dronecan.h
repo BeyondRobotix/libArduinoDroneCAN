@@ -212,6 +212,7 @@ public:
     void handle_GetNodeInfo(CanardRxTransfer *transfer);
     void handle_param_GetSet(CanardRxTransfer *transfer);
     void handle_param_ExecuteOpcode(CanardRxTransfer *transfer);
+    void handle_RestartNode(CanardRxTransfer *transfer);
     void handle_begin_firmware_update(CanardRxTransfer *transfer);
     void handle_file_read_response(CanardRxTransfer *transfer);
     int handle_DNA_Allocation(CanardRxTransfer *transfer);
