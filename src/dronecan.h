@@ -86,6 +86,14 @@ private:
     // firmware update that changes the layout invalidates stale contents.
     uint32_t parameter_signature() const;
 
+    // Note that a parameter changed and needs persisting. The actual write
+    // is deferred so a burst of GetSet writes collapses into one flush.
+    void mark_parameters_dirty();
+
+    // Called from cycle(): writes pending parameter changes once the write
+    // burst has gone quiet. No-op when nothing is dirty.
+    void service_parameter_persist();
+
     void request_DNA();
     void send_NodeStatus(void);
     void process1HzTasks(uint64_t timestamp_usec);
@@ -158,18 +166,35 @@ public:
         parameters = param_list;
     }
 
+    /*
+        persist_on_set (default true) makes a parameter written over CAN
+        (uavcan.protocol.param.GetSet) persist by itself, matching AP_Periph's
+        set_and_save_ifchanged() behaviour -- which is what users coming from
+        ArduPilot expect from Mission Planner's parameter write.
+
+        Writes are coalesced, not immediate: a set marks the parameter set
+        dirty and cycle() flushes once PARAM_PERSIST_DELAY_MS has passed with
+        no further writes. A GCS burst of N parameters therefore costs one
+        flush, not N. Unchanged values are skipped entirely.
+
+        Set false for the strict DroneCAN behaviour, where GetSet writes are
+        RAM-only and ExecuteOpcode(SAVE) is the only thing that persists.
+        ExecuteOpcode(SAVE) works either way.
+    */
     void init(CanardOnTransferReception onTransferReceived,
               CanardShouldAcceptTransfer shouldAcceptTransfer,
               const std::vector<parameter> &param_list,
               const char *name,
               CanMode mode = CanMode::Classic,
               CanPort port = CanPort::PORT1,
-              int storage_page = -1);
+              int storage_page = -1,
+              bool persist_on_set = true);
     void init(const std::vector<parameter> &param_list,
               const char *name,
               CanMode mode = CanMode::Classic,
               CanPort port = CanPort::PORT1,
-              int storage_page = -1);
+              int storage_page = -1,
+              bool persist_on_set = true);
 
     /*
         Bare init: brings up CAN + canard without touching parameter storage.
@@ -199,6 +224,18 @@ public:
         set_node_status_override().
     */
     bool storage_healthy() const { return DroneCAN_Storage::healthy(); }
+
+    /*
+        Write any pending parameter changes to flash now, bypassing the
+        coalescing delay. Called automatically before a RestartNode reset and
+        by ExecuteOpcode(SAVE); call it directly before any other deliberate
+        power-down or reset. Returns false if the write failed; returns true
+        when there was nothing to do.
+    */
+    bool flush_parameters();
+
+    /* True if a parameter change is waiting to be written to flash. */
+    bool parameters_dirty() const { return params_dirty_; }
 
     /*
         Optional hook: called from handle_file_read_response() with each chunk
@@ -292,6 +329,19 @@ private:
     bool     canfd_default_ = false;
     CanPort  port_          = CanPort::PORT1;
     uint32_t storage_page_  = 0; // resolved by init() from the storage_page arg
+
+    // Deferred parameter persistence (see the persist_on_set note on init())
+    bool     persist_on_set_ = true;
+    bool     params_dirty_   = false;
+    uint32_t params_dirty_ms_ = 0;
+
+    /*
+        Quiet period after the last parameter write before the flush runs.
+        Long enough to swallow a GCS "write all parameters" burst into a
+        single flash write, short enough that a user changing a value and
+        pulling power still gets it saved.
+    */
+    static constexpr uint32_t PARAM_PERSIST_DELAY_MS = 500;
 
 public:
 

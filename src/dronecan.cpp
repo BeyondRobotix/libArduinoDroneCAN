@@ -34,13 +34,15 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
                     const char *name,
                     CanMode mode,
                     CanPort port,
-                    int storage_page)
+                    int storage_page,
+                    bool persist_on_set)
 {
     port_         = port;
     storage_page_ = (storage_page >= 0)
                   ? (uint32_t)storage_page
                   : DroneCAN_Storage::default_page((uint8_t)port);
     canfd_default_ = (mode != CanMode::Classic);
+    persist_on_set_ = persist_on_set;
     dronecan_can_init(mode, (uint8_t)port);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
@@ -111,13 +113,15 @@ void DroneCAN::init(const std::vector<parameter> &param_list,
                     const char *name,
                     CanMode mode,
                     CanPort port,
-                    int storage_page)
+                    int storage_page,
+                    bool persist_on_set)
 {
     port_         = port;
     storage_page_ = (storage_page >= 0)
                   ? (uint32_t)storage_page
                   : DroneCAN_Storage::default_page((uint8_t)port);
     canfd_default_ = (mode != CanMode::Classic);
+    persist_on_set_ = persist_on_set;
     dronecan_can_init(mode, (uint8_t)port);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
@@ -236,6 +240,73 @@ void DroneCAN::cycle()
 
     this->processRx();
     this->processTx();
+
+    // Write out any coalesced parameter changes once the burst has settled
+    this->service_parameter_persist();
+}
+
+/*
+    Note that a parameter changed and needs writing to flash. The write is
+    deferred: each call restarts the quiet timer, so a GCS writing N
+    parameters back-to-back produces a single flash write rather than N.
+*/
+void DroneCAN::mark_parameters_dirty()
+{
+    params_dirty_    = true;
+    params_dirty_ms_ = millis();
+}
+
+/*
+    Write pending parameter changes now, ignoring the coalescing delay.
+    Returns true if there was nothing to do or the write succeeded.
+*/
+bool DroneCAN::flush_parameters()
+{
+    if (!params_dirty_)
+    {
+        return true;
+    }
+
+    std::vector<float> values(parameters.size());
+    for (size_t i = 0; i < parameters.size(); i++)
+    {
+        values[i] = parameters[i].value;
+    }
+
+    const bool ok = DroneCAN_Storage::save_all(values.data(), values.size(),
+                                               storage_page_, parameter_signature());
+    if (ok)
+    {
+        params_dirty_ = false;
+    }
+    else if (Serial)
+    {
+        Serial.println("Storage: parameter flush failed");
+    }
+    return ok;
+}
+
+/*
+    Called every cycle(). Flushes once PARAM_PERSIST_DELAY_MS has elapsed
+    with no further parameter writes.
+*/
+void DroneCAN::service_parameter_persist()
+{
+    if (!params_dirty_)
+    {
+        return;
+    }
+    if (millis() - params_dirty_ms_ < PARAM_PERSIST_DELAY_MS)
+    {
+        return;
+    }
+    // On failure, clear the dirty flag anyway -- flush_parameters() has
+    // already reported it and latched storage_healthy() false. Retrying
+    // every cycle would just stall the node on a dead flash sector.
+    if (!flush_parameters())
+    {
+        params_dirty_ = false;
+    }
 }
 
 /*
@@ -366,12 +437,17 @@ void DroneCAN::handle_param_GetSet(CanardRxTransfer *transfer)
 
     IWatchdog.reload();
 
-    // If it's a _set_ request, apply the new value to RAM only. We deliberately
-    // do NOT persist to flash here: on H7 a page erase blocks for seconds with
-    // interrupts disabled, which stalls the GetSet response past the requester's
-    // service timeout (and can trip the watchdog). Persistence is the job of
-    // ExecuteOpcode(SAVE) -- see handle_param_ExecuteOpcode() -- which the GUI's
-    // "Store all params" action triggers.
+    // If it's a _set_ request, apply the new value to RAM and, when
+    // persist_on_set_ is enabled (the default), mark it for persisting.
+    //
+    // The flash write is deliberately NOT done inline here. It is deferred by
+    // PARAM_PERSIST_DELAY_MS so that a "write all parameters" burst costs one
+    // write instead of one per parameter -- which matters most on L4, where
+    // each write is a 2 KB page erase. Unchanged values are skipped entirely,
+    // mirroring AP_Periph's set_and_save_ifchanged().
+    //
+    // With persist_on_set_ false, this stays RAM-only and ExecuteOpcode(SAVE)
+    // is the only thing that persists (strict DroneCAN semantics).
     if (idx != SIZE_MAX && req.value.union_tag != UAVCAN_PROTOCOL_PARAM_VALUE_EMPTY)
     {
         auto &p = parameters[idx];
@@ -405,7 +481,18 @@ void DroneCAN::handle_param_GetSet(CanardRxTransfer *transfer)
             {
                 set_value = p.max_value;
             }
-            p.value = set_value;
+
+            // Skip-if-unchanged: a GCS "write all" resends every parameter,
+            // and rewriting an identical value would cost a flash erase for
+            // nothing.
+            if (p.value != set_value)
+            {
+                p.value = set_value;
+                if (persist_on_set_)
+                {
+                    mark_parameters_dirty();
+                }
+            }
         }
     }
 
@@ -471,6 +558,9 @@ void DroneCAN::handle_param_ExecuteOpcode(CanardRxTransfer *transfer)
     {
         return;
     }
+
+    bool opcode_ok = true;
+
     if (req.opcode == UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_REQUEST_OPCODE_ERASE)
     {
         // Reset all parameters to defaults
@@ -478,19 +568,19 @@ void DroneCAN::handle_param_ExecuteOpcode(CanardRxTransfer *transfer)
         {
             parameters[i].value = parameters[i].min_value; // Or some default value
         }
+        // Persist the reset so an ERASE survives a reboot, the same way a
+        // parameter write does. AP_Periph's ERASE is likewise persistent.
+        mark_parameters_dirty();
+        opcode_ok = flush_parameters();
     }
-    bool opcode_ok = true;
 
     if (req.opcode == UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_REQUEST_OPCODE_SAVE)
     {
-        // Save all the changed parameters to permanent storage
-        std::vector<float> values(parameters.size());
-        for (size_t i = 0; i < parameters.size(); i++)
-        {
-            values[i] = parameters[i].value;
-        }
-        opcode_ok = DroneCAN_Storage::save_all(values.data(), values.size(),
-                                               storage_page_, parameter_signature());
+        // Persist everything now. Still the only thing that persists when
+        // persist_on_set_ is false; with it enabled, this just forces the
+        // pending coalesced flush to happen immediately.
+        mark_parameters_dirty();
+        opcode_ok = flush_parameters();
         if (!opcode_ok && Serial)
         {
             Serial.println("Storage: save_all failed");
@@ -564,6 +654,10 @@ void DroneCAN::handle_RestartNode(CanardRxTransfer *transfer)
         // Bad magic: we've ACKed with ok=false; do not reset.
         return;
     }
+
+    // Persist any coalesced parameter changes before we lose RAM. Without
+    // this, a set immediately followed by a restart would be discarded.
+    flush_parameters();
 
     // Push the ACK out before resetting -- canardRequestOrRespondObj only
     // queues the frames; NVIC_SystemReset() would drop them otherwise.
@@ -685,7 +779,16 @@ void DroneCAN::setParameterByIndex(size_t idx, float value)
         value = p.max_value;
     }
 
-    // Set value and persist to storage
+    // Nothing to do if the value is already what was asked for -- skipping
+    // saves a flash write (a full page erase on L4).
+    if (parameters[idx].value == value)
+    {
+        return;
+    }
+
+    // Set value and persist to storage. This is the direct C++ API, so the
+    // caller asked for this write explicitly: persist immediately rather
+    // than going through the coalescing delay used for CAN param writes.
     parameters[idx].value = value;
     if (!DroneCAN_Storage::save(idx, value, parameters.size(), storage_page_,
                                 parameter_signature()))
