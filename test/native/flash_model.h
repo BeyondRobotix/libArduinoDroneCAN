@@ -6,10 +6,19 @@
 namespace flashmodel
 {
 
-// Mirrors an STM32H723: 1 MB of flash as 8 x 128 KB sectors.
+// Flash geometry, selected by the build so one model serves both families.
+//   MODEL_H7 : STM32H723 -- 1 MB as 8 x 128 KB sectors, 32-byte write unit
+//   otherwise: STM32L431 -- 256 KB as 128 x 2 KB pages,  8-byte write unit
 constexpr uint32_t FLASH_BASE_ADDR = 0x08000000u;
-constexpr size_t   PAGE_SIZE       = 128u * 1024u;
-constexpr uint32_t NUM_PAGES       = 8u;
+#if defined(MODEL_H7)
+constexpr size_t   PAGE_SIZE  = 128u * 1024u;
+constexpr uint32_t NUM_PAGES  = 8u;
+constexpr size_t   WRITE_UNIT = 32u;
+#else
+constexpr size_t   PAGE_SIZE  = 2u * 1024u;
+constexpr uint32_t NUM_PAGES  = 128u;
+constexpr size_t   WRITE_UNIT = 8u;
+#endif
 
 // Wipe the whole model to the erased state and clear all counters.
 void reset();

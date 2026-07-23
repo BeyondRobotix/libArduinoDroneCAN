@@ -1,12 +1,16 @@
 /*
-    Host tests for the H7 log-structured parameter storage in storage.cpp.
+    Host tests for the log-structured parameter storage in storage.cpp.
 
-    Build and run with test/native/run_tests.ps1. These exercise the parts
-    that are painful to reach on hardware: log replay, compaction when a
-    sector fills, and recovery from power loss at each step of a sector
-    switch. The flash model aborts on any write that violates the H7
-    write-once-per-32-byte-word rule, so an ECC-illegal access fails loudly
-    rather than silently passing here and faulting on target.
+    Run via test/native/run_tests.ps1, which builds this twice: once with the
+    H7 geometry (128 KB sectors, 32-byte flash words) and once with the L4
+    geometry (2 KB pages, 8-byte double words). Everything below is written
+    against the geometry constants so both passes share one suite.
+
+    These exercise the parts that are painful to reach on hardware: log
+    replay, compaction when a page fills, and recovery from power loss at
+    each step of a sector switch. The flash model aborts on any write that
+    violates the write-once-per-word rule, so an ECC-illegal access on H7
+    fails loudly here rather than faulting on target.
 */
 
 #include "../../src/storage.h"
@@ -73,8 +77,18 @@ static uint32_t sig_for(const char *const *names, size_t count)
     return sig;
 }
 
-// PORT1 pair on an 8-sector part: sectors 7 (primary) and 6 (spare).
-static constexpr uint32_t kPage = NUM_PAGES - 1;
+// Geometry, mirroring storage.cpp. A record is one flash word; a state slot
+// is >= 12 bytes rounded up to a whole number of words (16 on L4, 32 on H7).
+static constexpr size_t kRecord = WRITE_UNIT;
+static constexpr size_t kSlot   = (WRITE_UNIT >= 16) ? WRITE_UNIT : 16;
+static constexpr size_t kHeader = 3 * kSlot;
+// Flash-word writes consumed by one state-slot write (2 on L4, 1 on H7).
+static constexpr long kSlotWords = (long)(kSlot / WRITE_UNIT);
+// Records that fit in one page after the header.
+static constexpr int kSlots = (int)((PAGE_SIZE - kHeader) / kRecord);
+
+// The pair is (base, base+1); use the last two pages of the model.
+static constexpr uint32_t kPage = NUM_PAGES - 2;
 
 // ---------------------------------------------------------------------------
 
@@ -172,8 +186,7 @@ static void test_compaction_when_sector_fills()
     float values[kCount] = {1, 2, 3, 4, 5};
     CHECK(DroneCAN_Storage::save_all(values, kCount, kPage, sig));
 
-    // 128 KB sector, 96 B header, 32 B records -> 4093 record slots.
-    const int slots = (int)((PAGE_SIZE - 96) / 32);
+    const int slots = kSlots;
 
     reset_counters();
     for (int i = 0; i < slots + 10; i++) {
@@ -200,7 +213,7 @@ static void test_power_loss_during_sector_switch()
     CHECK(DroneCAN_Storage::save_all(values, kCount, kPage, sig));
     CHECK(DroneCAN_Storage::load(values, kCount, kPage, sig));
 
-    const int slots = (int)((PAGE_SIZE - 96) / 32);
+    const int slots = kSlots;
     // Fill the log to one record short of full.
     for (int i = 0; i < slots - kCount - 1; i++) {
         CHECK(DroneCAN_Storage::save(2, (float)i, kCount, kPage, sig));
@@ -239,9 +252,9 @@ static void test_power_loss_during_first_save()
     const uint32_t sig = sig_for(kNames, kCount);
 
     float values[kCount] = {5, 6, 7, 8, 9};
-    // Word 0 is the IN_USE header slot, so records 0 and 1 land and record 2
-    // is the one that dies.
-    arm_power_loss(3);
+    // The IN_USE header slot costs kSlotWords flash-word writes, so records 0
+    // and 1 land after it and record 2 is the one that dies.
+    arm_power_loss(kSlotWords + 2);
     DroneCAN_Storage::save_all(values, kCount, kPage, sig);
 
     reboot();
@@ -270,7 +283,7 @@ static void test_reboot_erases_stale_sector()
     CHECK(DroneCAN_Storage::save_all(values, kCount, kPage, sig));
     CHECK(DroneCAN_Storage::load(values, kCount, kPage, sig));
 
-    const int slots = (int)((PAGE_SIZE - 96) / 32);
+    const int slots = kSlots;
     for (int i = 0; i < slots + 5; i++) {
         CHECK(DroneCAN_Storage::save(3, (float)i, kCount, kPage, sig));
     }
@@ -302,7 +315,11 @@ static void test_oversized_parameter_set_rejected()
 
 int main()
 {
-    printf("storage.cpp H7 log-structured tests\n\n");
+    printf("storage.cpp log-structured tests -- %s geometry\n",
+           (WRITE_UNIT == 32) ? "H7 (128 KB sector, 32 B word)"
+                              : "L4 (2 KB page, 8 B word)");
+    printf("  page %zu B, record %zu B, header %zu B -> %d records per page\n\n",
+           PAGE_SIZE, kRecord, kHeader, kSlots);
 
     test_first_boot_returns_defaults();
     test_save_all_then_load();

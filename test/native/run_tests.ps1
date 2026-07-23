@@ -1,9 +1,14 @@
 <#
     Builds and runs the host-side storage tests with MSVC.
 
-    These compile src/storage.cpp for the H7 path against a RAM model of the
-    flash peripheral (flash_model.cpp), so the log/compaction/recovery state
-    machine can be exercised without hardware.
+    src/storage.cpp is compiled against a RAM model of the flash peripheral
+    (flash_model.cpp) so the log/compaction/recovery state machine can be
+    exercised without hardware. It is built and run TWICE, once per flash
+    geometry, because the two families differ in ways the algorithm depends
+    on -- 32-byte write-once words on H7 vs 8-byte double words on L4:
+
+        H7 : 128 KB sectors, 32-byte records -> 4093 records/sector
+        L4 :   2 KB pages,    8-byte records ->  250 records/page
 
     Usage:  pwsh test/native/run_tests.ps1
 #>
@@ -52,30 +57,53 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 $src = @(
     (Join-Path $here '..\..\src\storage.cpp'),
     (Join-Path $here 'flash_model.cpp'),
-    (Join-Path $here 'test_storage_h7.cpp')
+    (Join-Path $here 'test_storage.cpp')
 )
 
-# STM32H7 + STM32H7xx select the log-structured path; BOARD_FLASH_SIZE keeps
-# storage.cpp's expectations aligned with the 1 MB / 8-sector flash model.
-$defines = @(
-    '/DSTM32H7', '/DSTM32H7xx', '/DBOARD_FLASH_SIZE=1024', '/DSTORAGE_HOST_TEST',
-    '/DWIN32_LEAN_AND_MEAN', '/D_CRT_SECURE_NO_WARNINGS'
+$common = @(
+    '/DSTORAGE_HOST_TEST', '/DWIN32_LEAN_AND_MEAN', '/D_CRT_SECURE_NO_WARNINGS'
 )
 
-& $cl /nologo /std:c++17 /EHsc /W3 /Zi `
-    $defines `
-    "/I$here" `
-    $src `
-    /Fe:"$out\test_storage.exe" `
-    /Fo:"$out\" /Fd:"$out\test_storage.pdb" `
-    | Write-Host
+# Per-geometry defines. MODEL_H7 switches flash_model.h; the STM32* defines
+# switch storage.cpp. BOARD_FLASH_SIZE and STORAGE_FLASH_PAGE match each
+# model's page count, with the storage pair at the top of the modelled flash.
+$targets = @(
+    @{ Name = 'H7'
+       Defines = @('/DMODEL_H7', '/DSTM32H7', '/DSTM32H7xx',
+                   '/DBOARD_FLASH_SIZE=1024', '/DSTORAGE_FLASH_PAGE=6') },
+    @{ Name = 'L4'
+       Defines = @('/DSTM32L4', '/DSTM32L4xx',
+                   '/DBOARD_FLASH_SIZE=256', '/DSTORAGE_FLASH_PAGE=126') }
+)
 
-if ($LASTEXITCODE -ne 0) { throw "compilation failed ($LASTEXITCODE)" }
+$failed = 0
+foreach ($t in $targets) {
+    $exe = Join-Path $out "test_storage_$($t.Name).exe"
+    $obj = Join-Path $out "$($t.Name)"
+    New-Item -ItemType Directory -Force -Path $obj | Out-Null
 
-Write-Host ''
-& "$out\test_storage.exe"
-$rc = $LASTEXITCODE
-Write-Host ''
-if ($rc -eq 0) { Write-Host 'PASS' -ForegroundColor Green }
-else { Write-Host "FAIL (exit $rc)" -ForegroundColor Red }
-exit $rc
+    Write-Host "=== building $($t.Name) geometry ===" -ForegroundColor Cyan
+    & $cl /nologo /std:c++17 /EHsc /W3 /Zi `
+        ($common + $t.Defines) `
+        "/I$here" `
+        $src `
+        /Fe:"$exe" `
+        /Fo:"$obj\" /Fd:"$obj\test_storage.pdb" `
+        | Write-Host
+
+    if ($LASTEXITCODE -ne 0) { throw "$($t.Name) compilation failed ($LASTEXITCODE)" }
+
+    Write-Host ''
+    & $exe
+    if ($LASTEXITCODE -ne 0) {
+        $failed++
+        Write-Host "$($t.Name): FAIL (exit $LASTEXITCODE)" -ForegroundColor Red
+    } else {
+        Write-Host "$($t.Name): PASS" -ForegroundColor Green
+    }
+    Write-Host ''
+}
+
+if ($failed -eq 0) { Write-Host 'ALL GEOMETRIES PASS' -ForegroundColor Green; exit 0 }
+Write-Host "$failed geometry/geometries FAILED" -ForegroundColor Red
+exit 1

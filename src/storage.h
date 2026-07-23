@@ -5,64 +5,67 @@
 #include <stddef.h>
 
 /*
-    Flash-based parameter storage.
+    Log-structured flash parameter storage.
 
-    Two implementations are selected at compile time, matching the way
-    flash.cpp already dispatches on MCU family:
+    Persisting a parameter must not erase flash. An erase blocks the core
+    with interrupts disabled -- ~1 s for a 128 KB H7 sector, ~20 ms for a
+    2 KB L4 page -- and, more importantly, flash endurance is only ~10k
+    erase cycles per page. A design that erases per write puts a hard
+    ceiling on how many times a parameter can ever be written.
 
-    ---- H7 (CoreNode H743, MicroNodePlus H723): log-structured ----------------
+    So instead of rewriting a fixed blob in place, this keeps an append-only
+    log across a ping-pong pair of pages, following ArduPilot's
+    AP_FlashStorage:
 
-    The H7 erase unit is a 128 KB sector and an erase blocks the core for
-    roughly a second with interrupts disabled -- far too long to sit in the
-    path of a parameter save. So the H7 build never erases on the write path.
+        [ sector header: 3 state slots ][ record ][ record ][ ... ]
 
-    Two sectors are used as a ping-pong pair (`page` and `page - 1`). The
-    active sector holds a header followed by an append-only log of 32-byte
-    records, one per parameter write. Loading replays the log; the last
-    record for a given index wins. When the active sector fills, the values
-    are compacted into the spare sector and the old one is marked FULL --
-    it is erased at the next load(), not inline.
+    A save appends one record. Loading replays the log; the last record for
+    a given index wins. When the active page fills, the live values are
+    compacted into the pre-erased spare and the old page is marked FULL --
+    its erase is deferred to the next load(), i.e. to boot. The write path
+    never erases.
 
-    Records are 32 bytes because that is the H7 flash word: a 256-bit write
-    is the smallest unit the peripheral accepts, and ECC is computed over
-    the whole word, so a word can be programmed exactly once per erase.
-    That also rules out the progressive bit-clearing state machine used on
-    other families -- each sector state transition claims its own fresh
-    32-byte slot instead (see `sector_slot`).
+    Records per page, and therefore writes per erase cycle:
 
-    ---- L4 / G4 / F4: erase-and-rewrite (unchanged behaviour) ----------------
+        L4  (2 KB page,      8-byte records) ->  250
+        H7  (128 KB sector, 32-byte records) -> 4093
 
-    The erase unit is 2 KB and an erase takes ~20 ms, so the simple scheme
-    is fine. One page holds the whole parameter blob:
+    Record size is the family's flash programming granularity. On H7 that
+    is a 256-bit flash word: ECC is computed across the whole word, so a
+    word can be programmed exactly once per erase. That rules out the
+    progressive bit-clearing state machine other families allow, so each
+    sector state transition claims its own fresh slot rather than rewriting
+    one in place. The same slot scheme is used everywhere for one code path.
 
-        [float param_0] ... [float param_N-1] [uint32_t MAGIC] [uint32_t SIG]
+    Every entry carries a signature derived from the parameter name list. A
+    firmware update that renames, reorders or resizes the parameter set
+    changes the signature, so stale values are rejected and the code
+    defaults are used instead of being silently reassigned to the wrong
+    parameters.
 
-    padded up to WRITE_ALIGN. Every save erases the page and rewrites it.
-
-    --------------------------------------------------------------------------
-
-    Both implementations store a signature derived from the parameter name
-    list. A firmware update that reorders or renames parameters changes the
-    signature, so stored values are rejected and the code defaults are used
-    instead of being silently reassigned to the wrong parameters.
-
-    STORAGE_FLASH_PAGE can be defined at build time to override the default
-    page (last page, or last sector of the pair on H7).
+    The page pair is chosen by default_page(): PORT1 takes (base, base+1)
+    and PORT2 takes (base+2, base+3), where base is STORAGE_FLASH_PAGE from
+    the board definition. Boards place that region deliberately -- on L4 in
+    the tail of the bootloader reserve, on H7 at the top of flash -- and the
+    linker script reserves it. See br_platformio_hwdef.
 */
 class DroneCAN_Storage
 {
 public:
-    // Return the flash page number for a given port index (0=PORT1, 1=PORT2).
-    // On H7 each port owns a two-sector pair and this returns the first of
-    // the pair (the second is `page - 1`). Elsewhere each port owns one page.
+    // Return the first flash page of the pair used by the given port index
+    // (0=PORT1, 1=PORT2). The pair is (page, page+1).
     static uint32_t default_page(uint8_t port_index = 0);
 
     // Load parameter values from storage into `values`.
     //
     // `signature` must be built with signature_begin()/signature_feed() over
     // the current parameter name list. Returns true only if storage held
-    // valid data written under the same signature; `values` is left untouched
-    // otherwise, so the caller's code defaults survive.
+    // valid data written under the same signature; `values` is left
+    // untouched otherwise, so the caller's code defaults survive.
+    //
+    // This is also the recovery point: it resolves which page is active and
+    // pays any erase the previous power cycle deferred. Call it once at
+    // startup before any save().
     static bool load(float *values, size_t count, uint32_t page, uint32_t signature);
 
     // Persist a single parameter value at `index`. Returns false on failure.
@@ -80,13 +83,11 @@ public:
     // Build a signature over the parameter name list:
     //     uint32_t sig = signature_begin();
     //     for (auto &p : parameters) sig = signature_feed(sig, p.name);
-    // Also folds in the parameter count, so add/remove is caught too.
     static uint32_t signature_begin();
     static uint32_t signature_feed(uint32_t sig, const char *name);
 
-    // Largest parameter set the storage layer will handle. Bounds the
-    // stack buffers used when rebuilding the value set (previously VLAs
-    // sized from a runtime count). Override with -DSTORAGE_MAX_PARAMS=N.
+    // Largest parameter set the storage layer will handle. Bounds the stack
+    // buffer used when compacting. Override with -DSTORAGE_MAX_PARAMS=N.
 #ifndef STORAGE_MAX_PARAMS
     static constexpr size_t MAX_PARAMS = 64;
 #else
@@ -94,31 +95,8 @@ public:
 #endif
 
 private:
-    static constexpr uint32_t STORAGE_MAGIC = 0x4443414E; // "DCAN"
-
-    // Minimum write granularity. H7 needs 32 (256-bit flash word); F4 is 2
-    // and G4/L4 are 8. The non-H7 path rounds up to 32 for all of them --
-    // it costs a few bytes of a 2 KB page and keeps one code path.
-    static constexpr size_t WRITE_ALIGN = 32;
-
     // Latched failure flag behind healthy().
     static bool failed_;
-
-    // Round a byte count up to the next WRITE_ALIGN boundary.
-    static size_t align_up(size_t n);
-
-    // Same, usable as an array bound.
-    static constexpr size_t align_up_const(size_t n)
-    {
-        return (n + WRITE_ALIGN - 1) & ~(WRITE_ALIGN - 1);
-    }
-
-#if !defined(STM32H7) && !defined(STM32H7xx)
-    // Non-H7: write the full blob (params + magic + signature) to the page.
-    // Erases first, then writes. Returns true on success.
-    static bool write_page(const float *values, size_t count,
-                           uint32_t page, uint32_t signature);
-#endif
 };
 
 #endif // DRONECAN_STORAGE_H

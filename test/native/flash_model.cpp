@@ -5,8 +5,9 @@
     It enforces the constraints that actually matter for the algorithm:
 
       * erase granularity is a whole 128 KB sector, erased state is 0xFF
-      * writes must be 32-byte aligned and a multiple of 32 bytes
-      * each 32-byte flash word may be programmed only ONCE per erase
+      * writes must be aligned to, and a multiple of, the family's write
+        unit (32 bytes on H7, 8 on L4)
+      * each flash word may be programmed only ONCE per erase
         (this is the ECC constraint; stm32_flash_write_h7() enforces the
         same thing on target via stm32h7_check_all_ones())
 
@@ -157,8 +158,8 @@ bool stm32_flash_write(uint32_t addr, const void *buf, uint32_t count)
         return false;
     }
     ensure_mapped();
-    // H7 programming granularity
-    if ((addr & 0x1F) || (count & 0x1F)) {
+    // Programming granularity for the modelled family
+    if ((addr % WRITE_UNIT) != 0 || (count % WRITE_UNIT) != 0) {
         fprintf(stderr, "FLASH MODEL: unaligned write addr=0x%08x count=%u\n",
                 addr, count);
         abort();
@@ -172,17 +173,19 @@ bool stm32_flash_write(uint32_t addr, const void *buf, uint32_t count)
     const uint8_t *src = (const uint8_t *)buf;
     uint32_t off = addr - FLASH_BASE_ADDR;
 
-    for (uint32_t done = 0; done < count; done += 32, off += 32, src += 32) {
+    for (uint32_t done = 0; done < count;
+         done += WRITE_UNIT, off += WRITE_UNIT, src += WRITE_UNIT) {
         uint8_t *dst = g_flash_base + off;
 
         // Already holds exactly this data: the target driver skips it.
-        if (memcmp(dst, src, 32) == 0) {
+        if (memcmp(dst, src, WRITE_UNIT) == 0) {
             continue;
         }
 
-        // A flash word can only be programmed from the erased state. This is
-        // the constraint that rules out in-place state-machine updates on H7.
-        for (int i = 0; i < 32; i++) {
+        // A flash word can only be programmed from the erased state. On H7
+        // this is the ECC constraint that rules out in-place state-machine
+        // updates; modelling it everywhere keeps one shared rule.
+        for (size_t i = 0; i < WRITE_UNIT; i++) {
             if (dst[i] != 0xFF) {
                 fprintf(stderr,
                         "FLASH MODEL: rewrite of programmed word at 0x%08x "
@@ -197,7 +200,7 @@ bool stm32_flash_write(uint32_t addr, const void *buf, uint32_t count)
             return false;
         }
 
-        memcpy(dst, src, 32);
+        memcpy(dst, src, WRITE_UNIT);
         g_word_writes++;
     }
     return true;

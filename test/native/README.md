@@ -1,7 +1,15 @@
 # Host tests for parameter storage
 
-Compiles `src/storage.cpp` on the host and runs its H7 log-structured path
-against a RAM model of the flash peripheral. No hardware required.
+Compiles `src/storage.cpp` on the host and runs it against a RAM model of the
+flash peripheral. No hardware required.
+
+The suite is built and run **twice**, once per flash geometry, because the
+algorithm depends on properties that differ between the families:
+
+| | page / sector | record | records per page |
+|---|---|---|---|
+| H7 (H743, H723) | 128 KB | 32 B | 4093 |
+| L4 (L431) | 2 KB | 8 B | 250 |
 
 ```powershell
 pwsh test/native/run_tests.ps1
@@ -22,12 +30,13 @@ here.
 
 `flash_model.cpp` reserves the real `0x08000000` address range from the OS,
 so `storage.cpp`'s memory-mapped reads work unmodified, and it aborts on any
-access that the H7 flash controller would reject:
+access the flash controller would reject:
 
-- writes must be 32-byte aligned and a whole number of 32-byte flash words
-- **a flash word may be programmed only once per erase** — this is the ECC
-  constraint that rules out in-place state-machine updates on H7, and the
-  reason sector states occupy three separate padded slots
+- writes must be aligned to, and a whole number of, the family's write unit
+- **a flash word may be programmed only once per erase** — on H7 this is the
+  ECC constraint that rules out in-place state-machine updates, and the reason
+  sector states occupy three separate padded slots. It is modelled on L4 too,
+  which is stricter than that hardware requires but keeps one shared rule
 
 An abort here means the code would have faulted or corrupted flash on target.
 
@@ -46,6 +55,7 @@ target is only cleared by a reset. `storage.cpp` exposes
 
 ## Coverage
 
-The L4/G4/F4 erase-and-rewrite path is not covered here — it is unchanged
-apart from the added signature word, and its behaviour is verified by the
-HIL suite at the mono-repo root.
+Both families run the same ten scenarios. What is *not* covered here is the
+integration with the DroneCAN layer — parameter persistence over the bus,
+the coalescing window, and flush-on-restart are covered by the HIL suite at
+the mono-repo root (`tests/test_node.py`).
