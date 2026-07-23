@@ -86,6 +86,18 @@ private:
     // firmware update that changes the layout invalidates stale contents.
     uint32_t parameter_signature() const;
 
+    /*
+        Which slot this node's parameters occupy in the shared storage log.
+        All instances on a board share one pair of flash pages and are told
+        apart by this tag, so a dual-CAN node costs no extra flash. PORT1 and
+        PORT2 map to instances 0 and 1; BOTH is a single bridged node, so it
+        shares instance 0 with the plain single-port case.
+    */
+    uint8_t storage_instance() const
+    {
+        return (port_ == CanPort::PORT2) ? 1 : 0;
+    }
+
     // Note that a parameter changed and needs persisting. The actual write
     // is deferred so a burst of GetSet writes collapses into one flush.
     void mark_parameters_dirty();

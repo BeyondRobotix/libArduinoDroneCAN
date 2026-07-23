@@ -20,7 +20,7 @@
         [ sector header: 3 state slots ][ record ][ record ][ ... ]
 
     A save appends one record. Loading replays the log; the last record for
-    a given index wins. When the active page fills, the live values are
+    a given key wins. When the active page fills, the live values are
     compacted into the pre-erased spare and the old page is marked FULL --
     its erase is deferred to the next load(), i.e. to boot. The write path
     never erases.
@@ -37,44 +37,54 @@
     sector state transition claims its own fresh slot rather than rewriting
     one in place. The same slot scheme is used everywhere for one code path.
 
-    Every entry carries a signature derived from the parameter name list. A
-    firmware update that renames, reorders or resizes the parameter set
-    changes the signature, so stale values are rejected and the code
-    defaults are used instead of being silently reassigned to the wrong
-    parameters.
+    ---- Instances -----------------------------------------------------------
 
-    The page pair is chosen by default_page(): PORT1 takes (base, base+1)
-    and PORT2 takes (base+2, base+3), where base is STORAGE_FLASH_PAGE from
-    the board definition. Boards place that region deliberately -- on L4 in
-    the tail of the bootloader reserve, on H7 at the top of flash -- and the
-    linker script reserves it. See br_platformio_hwdef.
+    One page pair serves every DroneCAN instance on the board. Each record
+    carries the instance it belongs to, so a dual-CAN node does NOT need a
+    second pair of flash pages -- which on H7 would mean another 256 KB.
+
+    Because two instances can have different parameter lists, the layout
+    signature cannot live in the sector header. Each instance instead appends
+    a *layout record* (its signature and parameter count) the first time it
+    writes. Replay tracks validity per instance as it scans, so a firmware
+    change to one instance's parameter list invalidates only that instance's
+    earlier records and leaves the other's alone.
+
+    ---- Areas ---------------------------------------------------------------
+
+    Records also carry a 4-bit area, of which only AREA_PARAM is implemented.
+    The remaining values are reserved so bulk storage (mission data and
+    similar) can be layered on later without another on-flash format change.
+    See the note in storage.cpp before using one.
 */
 class DroneCAN_Storage
 {
 public:
-    // Return the first flash page of the pair used by the given port index
-    // (0=PORT1, 1=PORT2). The pair is (page, page+1).
-    static uint32_t default_page(uint8_t port_index = 0);
+    // Return the first flash page of the storage pair. The pair is
+    // (page, page+1) and is shared by every instance.
+    static uint32_t default_page();
 
-    // Load parameter values from storage into `values`.
+    // Load parameter values for `instance` into `values`.
     //
     // `signature` must be built with signature_begin()/signature_feed() over
-    // the current parameter name list. Returns true only if storage held
-    // valid data written under the same signature; `values` is left
-    // untouched otherwise, so the caller's code defaults survive.
+    // that instance's parameter name list. Returns true only if storage held
+    // values written under the same signature and count; `values` is left
+    // untouched otherwise, so the caller's code defaults survive. Indices
+    // never written also keep their incoming value.
     //
     // This is also the recovery point: it resolves which page is active and
-    // pays any erase the previous power cycle deferred. Call it once at
-    // startup before any save().
-    static bool load(float *values, size_t count, uint32_t page, uint32_t signature);
+    // pays any erase the previous power cycle deferred. Call it once per
+    // instance at startup, before any save() for that instance.
+    static bool load(float *values, size_t count, uint32_t page,
+                     uint8_t instance, uint32_t signature);
 
     // Persist a single parameter value at `index`. Returns false on failure.
     static bool save(size_t index, float value, size_t total_count,
-                     uint32_t page, uint32_t signature);
+                     uint32_t page, uint8_t instance, uint32_t signature);
 
     // Persist all parameter values at once. Returns false on failure.
-    static bool save_all(const float *values, size_t count,
-                         uint32_t page, uint32_t signature);
+    static bool save_all(const float *values, size_t count, uint32_t page,
+                         uint8_t instance, uint32_t signature);
 
     // True until a flash write or erase fails; latched until the next
     // successful load(). Callers can surface this via NodeStatus health.
@@ -86,13 +96,24 @@ public:
     static uint32_t signature_begin();
     static uint32_t signature_feed(uint32_t sig, const char *name);
 
-    // Largest parameter set the storage layer will handle. Bounds the stack
-    // buffer used when compacting. Override with -DSTORAGE_MAX_PARAMS=N.
+    // Largest parameter set per instance. Bounds the compaction buffer, and
+    // the written-index mask below is sized to it. Override with
+    // -DSTORAGE_MAX_PARAMS=N (max 64: the mask is a uint64_t).
 #ifndef STORAGE_MAX_PARAMS
     static constexpr size_t MAX_PARAMS = 64;
 #else
     static constexpr size_t MAX_PARAMS = STORAGE_MAX_PARAMS;
 #endif
+    static_assert(MAX_PARAMS <= 64, "written-index mask is a uint64_t");
+
+    // Instances sharing the page pair. 2 covers PORT1 + PORT2; the record
+    // field is 4 bits so this can grow to 16 if a board ever needs it.
+#ifndef STORAGE_MAX_INSTANCES
+    static constexpr size_t MAX_INSTANCES = 2;
+#else
+    static constexpr size_t MAX_INSTANCES = STORAGE_MAX_INSTANCES;
+#endif
+    static_assert(MAX_INSTANCES <= 16, "instance field is 4 bits");
 
 private:
     // Latched failure flag behind healthy().

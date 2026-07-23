@@ -40,7 +40,7 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
     port_         = port;
     storage_page_ = (storage_page >= 0)
                   ? (uint32_t)storage_page
-                  : DroneCAN_Storage::default_page((uint8_t)port);
+                  : DroneCAN_Storage::default_page();
     canfd_default_ = (mode != CanMode::Classic);
     persist_on_set_ = persist_on_set;
     dronecan_can_init(mode, (uint8_t)port);
@@ -119,7 +119,7 @@ void DroneCAN::init(const std::vector<parameter> &param_list,
     port_         = port;
     storage_page_ = (storage_page >= 0)
                   ? (uint32_t)storage_page
-                  : DroneCAN_Storage::default_page((uint8_t)port);
+                  : DroneCAN_Storage::default_page();
     canfd_default_ = (mode != CanMode::Classic);
     persist_on_set_ = persist_on_set;
     dronecan_can_init(mode, (uint8_t)port);
@@ -176,7 +176,7 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
                     CanPort port)
 {
     port_          = port;
-    storage_page_  = DroneCAN_Storage::default_page((uint8_t)port);
+    storage_page_  = DroneCAN_Storage::default_page();
     canfd_default_ = (mode != CanMode::Classic);
     dronecan_can_init(mode, (uint8_t)port);
 
@@ -273,8 +273,8 @@ bool DroneCAN::flush_parameters()
         values[i] = parameters[i].value;
     }
 
-    const bool ok = DroneCAN_Storage::save_all(values.data(), values.size(),
-                                               storage_page_, parameter_signature());
+    const bool ok = DroneCAN_Storage::save_all(values.data(), values.size(), storage_page_,
+                                               storage_instance(), parameter_signature());
     if (ok)
     {
         params_dirty_ = false;
@@ -689,7 +689,8 @@ void DroneCAN::read_parameter_memory()
 
     const uint32_t sig = parameter_signature();
 
-    if (DroneCAN_Storage::load(values.data(), values.size(), storage_page_, sig))
+    if (DroneCAN_Storage::load(values.data(), values.size(), storage_page_,
+                               storage_instance(), sig))
     {
         for (size_t i = 0; i < parameters.size(); i++)
         {
@@ -701,7 +702,8 @@ void DroneCAN::read_parameter_memory()
         // No valid data in flash, or a firmware update changed the parameter
         // layout — save the code defaults so they survive reboots even if the
         // user never triggers a CAN save.
-        if (!DroneCAN_Storage::save_all(values.data(), values.size(), storage_page_, sig))
+        if (!DroneCAN_Storage::save_all(values.data(), values.size(), storage_page_,
+                                        storage_instance(), sig))
         {
             if (Serial) Serial.println("Storage: failed to write parameter defaults");
         }
@@ -791,7 +793,7 @@ void DroneCAN::setParameterByIndex(size_t idx, float value)
     // than going through the coalescing delay used for CAN param writes.
     parameters[idx].value = value;
     if (!DroneCAN_Storage::save(idx, value, parameters.size(), storage_page_,
-                                parameter_signature()))
+                                storage_instance(), parameter_signature()))
     {
         if (Serial) Serial.println("Storage: parameter save failed");
     }
