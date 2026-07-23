@@ -81,6 +81,11 @@ private:
     uint8_t get_preferred_node_id();
 
     void read_parameter_memory();
+
+    // Signature over the parameter name list, stored with the values so a
+    // firmware update that changes the layout invalidates stale contents.
+    uint32_t parameter_signature() const;
+
     void request_DNA();
     void send_NodeStatus(void);
     void process1HzTasks(uint64_t timestamp_usec);
@@ -187,6 +192,13 @@ public:
         CanMode::FD defaults its broadcasts to FD without callers passing a flag.
     */
     bool canfd_default() const { return canfd_default_; }
+
+    /*
+        False if a parameter flash write or erase has failed since the last
+        successful load. Callers can fold this into NodeStatus health via
+        set_node_status_override().
+    */
+    bool storage_healthy() const { return DroneCAN_Storage::healthy(); }
 
     /*
         Optional hook: called from handle_file_read_response() with each chunk

@@ -479,6 +479,8 @@ void DroneCAN::handle_param_ExecuteOpcode(CanardRxTransfer *transfer)
             parameters[i].value = parameters[i].min_value; // Or some default value
         }
     }
+    bool opcode_ok = true;
+
     if (req.opcode == UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_REQUEST_OPCODE_SAVE)
     {
         // Save all the changed parameters to permanent storage
@@ -487,13 +489,19 @@ void DroneCAN::handle_param_ExecuteOpcode(CanardRxTransfer *transfer)
         {
             values[i] = parameters[i].value;
         }
-        DroneCAN_Storage::save_all(values.data(), values.size(), storage_page_);
+        opcode_ok = DroneCAN_Storage::save_all(values.data(), values.size(),
+                                               storage_page_, parameter_signature());
+        if (!opcode_ok && Serial)
+        {
+            Serial.println("Storage: save_all failed");
+        }
     }
 
     struct uavcan_protocol_param_ExecuteOpcodeResponse pkt;
     memset(&pkt, 0, sizeof(pkt));
 
-    pkt.ok = true;
+    // Report the real outcome so the requester learns about a failed write
+    pkt.ok = opcode_ok;
 
     uint8_t buffer[UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE_RESPONSE_MAX_SIZE];
     uint16_t total_size = uavcan_protocol_param_ExecuteOpcodeResponse_encode(&pkt, buffer
@@ -585,7 +593,9 @@ void DroneCAN::read_parameter_memory()
         values[i] = parameters[i].value;
     }
 
-    if (DroneCAN_Storage::load(values.data(), values.size(), storage_page_))
+    const uint32_t sig = parameter_signature();
+
+    if (DroneCAN_Storage::load(values.data(), values.size(), storage_page_, sig))
     {
         for (size_t i = 0; i < parameters.size(); i++)
         {
@@ -594,10 +604,30 @@ void DroneCAN::read_parameter_memory()
     }
     else
     {
-        // No valid data in flash — save the code defaults so they
-        // survive reboots even if the user never triggers a CAN save.
-        DroneCAN_Storage::save_all(values.data(), values.size(), storage_page_);
+        // No valid data in flash, or a firmware update changed the parameter
+        // layout — save the code defaults so they survive reboots even if the
+        // user never triggers a CAN save.
+        if (!DroneCAN_Storage::save_all(values.data(), values.size(), storage_page_, sig))
+        {
+            if (Serial) Serial.println("Storage: failed to write parameter defaults");
+        }
     }
+}
+
+/*
+    Signature over the current parameter name list. Stored alongside the
+    values so that a firmware update which renames, reorders, or resizes the
+    parameter set invalidates the old contents instead of silently
+    reassigning values to the wrong parameters.
+*/
+uint32_t DroneCAN::parameter_signature() const
+{
+    uint32_t sig = DroneCAN_Storage::signature_begin();
+    for (const auto &p : parameters)
+    {
+        sig = DroneCAN_Storage::signature_feed(sig, p.name);
+    }
+    return sig;
 }
 
 /*
@@ -657,7 +687,11 @@ void DroneCAN::setParameterByIndex(size_t idx, float value)
 
     // Set value and persist to storage
     parameters[idx].value = value;
-    DroneCAN_Storage::save(idx, value, parameters.size(), storage_page_);
+    if (!DroneCAN_Storage::save(idx, value, parameters.size(), storage_page_,
+                                parameter_signature()))
+    {
+        if (Serial) Serial.println("Storage: parameter save failed");
+    }
 }
 
 /*
