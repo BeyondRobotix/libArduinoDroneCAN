@@ -9,6 +9,9 @@ extern "C"
     #ifdef CANH7
         #include "stm32h743xx.h"
     #endif
+    #ifdef CANC532
+        #include "stm32c532xx.h"
+    #endif
 }
 #include "Arduino.h"
 

@@ -12,6 +12,9 @@
 #ifdef ARDUINO_NUCLEO_H723ZG
     #include <canH723.h>
 #endif
+#ifdef CANC532
+    #include <canC5xx.h>
+#endif
 #include <storage.h>
 #include <vector>
 #include <IWatchdog.h>
@@ -20,6 +23,10 @@
 
 #if defined(CANL431) && defined(CANARD_ENABLE_CANFD) && CANARD_ENABLE_CANFD
     #error "CANFD requested on L431; bxCAN hardware does not support FDCAN. Use a CoreNode/MicroNodePlus build, or drop -DCANARD_ENABLE_CANFD."
+#endif
+
+#if defined(CANC532) && defined(CANARD_ENABLE_CANFD) && CANARD_ENABLE_CANFD
+    #error "CANFD requested on STM32C532; canC5xx.cpp only implements classic CAN 2.0B so far. Use a CoreNode/MicroNodePlus build, or drop -DCANARD_ENABLE_CANFD."
 #endif
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))

@@ -16,6 +16,9 @@
 #if defined(STM32G4xx) && !defined(STM32G4)
 #define STM32G4
 #endif
+#if defined(STM32C5xx) && !defined(STM32C5)
+#define STM32C5
+#endif
 
 #ifndef BOARD_FLASH_SIZE
 #error "You must define BOARD_FLASH_SIZE in kbytes (e.g. -DBOARD_FLASH_SIZE=256)"
@@ -57,8 +60,19 @@
 #define STM32_FLASH_FIXED_PAGE_SIZE 2
 #define STM32_FLASH_NBANKS      2
 
+#elif defined(STM32C5)
+// UNVERIFIED -- STM32C5's FLASH_CR has PER/PNB(7 bits)/STRT/LOCK/PG and no
+// BKER bit (checked against the STM32C532 CMSIS device header), i.e. the
+// same single-bank, 2 KB-page, flat-PNB-index shape as G4/L4's flash IP, so
+// this reuses their erase/write code paths below unmodified. Confirm page
+// size and bank count against the STM32C5 reference manual before trusting
+// this on real hardware.
+#define STM32_FLASH_NPAGES      (BOARD_FLASH_SIZE / 2)
+#define STM32_FLASH_FIXED_PAGE_SIZE 2
+#define STM32_FLASH_NBANKS      1
+
 #else
-#error "Unsupported MCU family for flash.cpp — define STM32H7, STM32L4, STM32F4, or STM32G4"
+#error "Unsupported MCU family for flash.cpp — define STM32H7, STM32L4, STM32F4, STM32G4, or STM32C5"
 #endif
 
 #ifndef STM32_FLASH_NBANKS
@@ -287,7 +301,7 @@ bool stm32_flash_erasepage(uint32_t page)
     FLASH->CR = FLASH_CR_PSIZE_1 | snb | FLASH_CR_SER;
     FLASH->CR |= FLASH_CR_STRT;
 
-#elif defined(STM32G4) || defined(STM32L4)
+#elif defined(STM32G4) || defined(STM32L4) || defined(STM32C5)
     FLASH->CR = FLASH_CR_PER;
     FLASH->CR |= page << FLASH_CR_PNB_Pos;
     FLASH->CR |= FLASH_CR_STRT;
@@ -457,7 +471,7 @@ static bool stm32_flash_write_f4(uint32_t addr, const void *buf, uint32_t count)
 }
 #endif // STM32F4
 
-#if defined(STM32G4) || defined(STM32L4)
+#if defined(STM32G4) || defined(STM32L4) || defined(STM32C5)
 static bool stm32_flash_write_g4(uint32_t addr, const void *buf, uint32_t count)
 {
     uint32_t *b = (uint32_t *)buf;
@@ -503,7 +517,7 @@ static bool stm32_flash_write_g4(uint32_t addr, const void *buf, uint32_t count)
     interrupts();
     return true;
 }
-#endif // STM32G4 || STM32L4
+#endif // STM32G4 || STM32L4 || STM32C5
 
 // ---- Public write dispatch -----------------------------------------------------
 
@@ -513,7 +527,7 @@ bool stm32_flash_write(uint32_t addr, const void *buf, uint32_t count)
     return stm32_flash_write_h7(addr, buf, count);
 #elif defined(STM32F4)
     return stm32_flash_write_f4(addr, buf, count);
-#elif defined(STM32G4) || defined(STM32L4)
+#elif defined(STM32G4) || defined(STM32L4) || defined(STM32C5)
     return stm32_flash_write_g4(addr, buf, count);
 #else
 #error "Unsupported MCU for flash write"

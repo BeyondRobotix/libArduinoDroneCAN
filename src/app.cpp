@@ -18,6 +18,10 @@
 #define APP_BASE_ADDRESS 0x0800A000UL   /* L4: 40 KB after flash start */
 #elif defined(CANH7) || defined(ARDUINO_NUCLEO_H723ZG)
 #define APP_BASE_ADDRESS 0x08020000UL   /* H7: sector-1 boundary (128 KB) */
+#elif defined(CANC532)
+#define APP_BASE_ADDRESS 0x0800A000UL   /* C5: 40 KB after flash start, UNVERIFIED --
+                                            must match BR_bootloader's board_config.h
+                                            CANC532 APP_START_ADDRESS */
 #endif
 
 void app_setup()
@@ -32,6 +36,10 @@ void app_setup()
     SCB->VTOR = APP_BASE_ADDRESS;
 
 #endif // CANH7 || ARDUINO_NUCLEO_H723ZG
+
+#ifdef CANC532
+    SCB->VTOR = APP_BASE_ADDRESS;
+#endif // CANC532
 
 #endif // DISABLE_APP_SETUP
 }
