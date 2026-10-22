@@ -266,6 +266,7 @@ public:
     CanardInstance canard;
     int version_major = 0;
     int version_minor = 0;
+    uint32_t vcs_commit = 0;
     int hardware_version_major = 0;
     int hardware_version_minor = 0;
 

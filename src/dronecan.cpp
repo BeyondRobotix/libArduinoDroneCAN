@@ -368,7 +368,10 @@ void DroneCAN::handle_GetNodeInfo(CanardRxTransfer *transfer)
     pkt.software_version.major = this->version_major;
     pkt.software_version.minor = this->version_minor;
     pkt.software_version.optional_field_flags = 0;
-    pkt.software_version.vcs_commit = 0; // should put git hash in here
+    pkt.software_version.vcs_commit = this->vcs_commit;
+    if (this->vcs_commit != 0) {
+        pkt.software_version.optional_field_flags |= UAVCAN_PROTOCOL_SOFTWAREVERSION_OPTIONAL_FIELD_FLAG_VCS_COMMIT;
+    }
 
     // should fill in hardware version
     pkt.hardware_version.major = this->hardware_version_major;
