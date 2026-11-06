@@ -260,6 +260,7 @@ public:
 
 private:
     firmware_write_fn firmware_write_cb = nullptr;
+    void compute_image_crc();
 
 public:
 
@@ -267,6 +268,8 @@ public:
     int version_major = 0;
     int version_minor = 0;
     uint32_t vcs_commit = 0;
+    // CRC-64-WE of the running image, computed in init() unless set first.
+    uint64_t image_crc = 0;
     int hardware_version_major = 0;
     int hardware_version_minor = 0;
 

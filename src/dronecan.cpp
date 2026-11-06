@@ -25,6 +25,48 @@ static bool dronecan_can_init(DroneCAN::CanMode mode, uint8_t port)
 #endif
 }
 
+// Image extent from the STM32 startup code and linker scripts. It matches the
+// .bin byte for byte, so a host can check image_crc against the file.
+extern "C" const uint8_t g_pfnVectors[];
+extern "C" const uint8_t _sidata[];
+extern "C" uint8_t _sdata[];
+extern "C" uint8_t _edata[];
+
+// CRC-64-WE, as the SoftwareVersion DSDL suggests: poly 0x42F0E1EBA9EA3693,
+// init and xorout all ones. One nibble per step keeps the table to 128 bytes.
+static const uint64_t crc64_we_nibble[16] = {
+    0x0000000000000000ULL, 0x42F0E1EBA9EA3693ULL,
+    0x85E1C3D753D46D26ULL, 0xC711223CFA3E5BB5ULL,
+    0x493366450E42ECDFULL, 0x0BC387AEA7A8DA4CULL,
+    0xCCD2A5925D9681F9ULL, 0x8E224479F47CB76AULL,
+    0x9266CC8A1C85D9BEULL, 0xD0962D61B56FEF2DULL,
+    0x17870F5D4F51B498ULL, 0x5577EEB6E6BB820BULL,
+    0xDB55AACF12C73561ULL, 0x99A54B24BB2D03F2ULL,
+    0x5EB4691841135847ULL, 0x1C4488F3E8F96ED4ULL,
+};
+
+void DroneCAN::compute_image_crc()
+{
+    if (this->image_crc != 0)
+    {
+        return; // set by the app
+    }
+    const uint8_t *p = g_pfnVectors;
+    const uint8_t *end = _sidata + (_edata - _sdata);
+    uint64_t crc = ~0ULL;
+    while (p < end)
+    {
+        crc ^= (uint64_t)*p++ << 56;
+        crc = (crc << 4) ^ crc64_we_nibble[crc >> 60];
+        crc = (crc << 4) ^ crc64_we_nibble[crc >> 60];
+        if (((uintptr_t)p & 0xFFF) == 0)
+        {
+            IWatchdog.reload();
+        }
+    }
+    this->image_crc = ~crc;
+}
+
 /*
     Kick off the CAN driver, Canard, do some parameter management
 */
@@ -48,6 +90,8 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
     strncpy(this->node_name, name, sizeof(this->node_name));
 
     IWatchdog.reload();
+
+    compute_image_crc();
 
     canardInit(&canard,
                memory_pool,
@@ -128,6 +172,8 @@ void DroneCAN::init(const std::vector<parameter> &param_list,
 
     IWatchdog.reload();
 
+    compute_image_crc();
+
     canardInit(&canard,
                memory_pool,
                sizeof(memory_pool),
@@ -183,6 +229,8 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
     strncpy(this->node_name, name, sizeof(this->node_name));
 
     IWatchdog.reload();
+
+    compute_image_crc();
 
     canardInit(&canard,
                memory_pool,
@@ -371,6 +419,10 @@ void DroneCAN::handle_GetNodeInfo(CanardRxTransfer *transfer)
     pkt.software_version.vcs_commit = this->vcs_commit;
     if (this->vcs_commit != 0) {
         pkt.software_version.optional_field_flags |= UAVCAN_PROTOCOL_SOFTWAREVERSION_OPTIONAL_FIELD_FLAG_VCS_COMMIT;
+    }
+    pkt.software_version.image_crc = this->image_crc;
+    if (this->image_crc != 0) {
+        pkt.software_version.optional_field_flags |= UAVCAN_PROTOCOL_SOFTWAREVERSION_OPTIONAL_FIELD_FLAG_IMAGE_CRC;
     }
 
     // should fill in hardware version
