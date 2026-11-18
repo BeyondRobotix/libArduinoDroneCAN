@@ -91,6 +91,7 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
                   : DroneCAN_Storage::default_page();
     canfd_default_ = (mode != CanMode::Classic);
     persist_on_set_ = persist_on_set;
+    mark_firmware_ok_ = true;
     dronecan_can_init(mode, (uint8_t)port);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
@@ -172,6 +173,7 @@ void DroneCAN::init(const std::vector<parameter> &param_list,
                   : DroneCAN_Storage::default_page();
     canfd_default_ = (mode != CanMode::Classic);
     persist_on_set_ = persist_on_set;
+    mark_firmware_ok_ = true;
     dronecan_can_init(mode, (uint8_t)port);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
@@ -285,6 +287,10 @@ void DroneCAN::cycle()
     {
         this->looptime = millis();
         this->process1HzTasks(this->micros64());
+        if (mark_firmware_ok_ && !firmware_ok_marked_ && now > FIRMWARE_OK_AFTER_MS)
+        {
+            mark_firmware_ok();
+        }
         if (cycle_led_pin >= 0)
         {
             digitalWrite(cycle_led_pin, this->led_state);
@@ -297,6 +303,24 @@ void DroneCAN::cycle()
 
     // Write out any coalesced parameter changes once the burst has settled
     this->service_parameter_persist();
+}
+
+/*
+    Write ArduPilot's RTC_BOOT_FWOK value into BOOTCOM's spare word at 0xF0,
+    which BR_bootloader reads (and clears) on every boot. AP_Periph uses RTC
+    backup register 0 for this; RAM is kept across a watchdog reset, needs no
+    backup-domain set-up, and the region is reserved in every app's linker
+    script. A full, aligned 64-bit write, then commit_bootcom_writes() for the
+    H7's ECC.
+*/
+static void commit_bootcom_writes();
+
+void DroneCAN::mark_firmware_ok()
+{
+    static constexpr uint64_t RTC_BOOT_FWOK = 0xb0093a26u;
+    *(volatile uint64_t *)(0x20000000u + 0xF0u) = RTC_BOOT_FWOK;
+    commit_bootcom_writes();
+    firmware_ok_marked_ = true;
 }
 
 /*

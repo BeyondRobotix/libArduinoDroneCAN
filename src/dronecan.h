@@ -360,6 +360,21 @@ private:
     CanPort  port_          = CanPort::PORT1;
     uint32_t storage_page_  = 0; // resolved by init() from the storage_page arg
 
+    /*
+        Tell BR_bootloader this firmware is good once it has run for
+        FIRMWARE_OK_AFTER_MS, as AP_Periph does with RTC_BOOT_FWOK (here in
+        BOOTCOM's spare word at 0xF0). After a watchdog reset the bootloader then boots
+        the app straight back up, instead of holding the node in the
+        bootloader (a node that resets in flight should come back). A new
+        image that crashes before then is held, so it can be replaced over
+        CAN. Only the app init()s arm this; the bootloader's bare init()
+        must never mark itself as good.
+    */
+    static constexpr uint32_t FIRMWARE_OK_AFTER_MS = 30000;
+    bool     mark_firmware_ok_ = false;
+    bool     firmware_ok_marked_ = false;
+    void mark_firmware_ok();
+
     // Deferred parameter persistence (see the persist_on_set note on init())
     bool     persist_on_set_ = true;
     bool     params_dirty_   = false;
