@@ -22,6 +22,20 @@
     #error "CANFD requested on L431; bxCAN hardware does not support FDCAN. Use a CoreNode/MicroNodePlus build, or drop -DCANARD_ENABLE_CANFD."
 #endif
 
+/*
+    Build-time trims for images with a tight flash budget, such as
+    BR_bootloader, which must fit in 36 KB on the L431. Define them in
+    build_flags. Apps normally define neither.
+
+    DRONECAN_NO_PARAMETER_STORAGE
+        Parameters live in RAM only: nothing is loaded from or written to
+        flash, and the SAVE / ERASE opcodes succeed without writing. Drops
+        the log-structured storage layer (about 2 KB).
+    DRONECAN_NO_IMAGE_CRC
+        GetNodeInfo reports an image CRC only if the app sets image_crc
+        itself; the running image is not hashed at init.
+*/
+
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define C_TO_KELVIN(temp) (temp + 273.15f)
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
@@ -345,6 +359,21 @@ private:
     bool     canfd_default_ = false;
     CanPort  port_          = CanPort::PORT1;
     uint32_t storage_page_  = 0; // resolved by init() from the storage_page arg
+
+    /*
+        Tell BR_bootloader this firmware is good once it has run for
+        FIRMWARE_OK_AFTER_MS, as AP_Periph does with RTC_BOOT_FWOK (here in
+        BOOTCOM's spare word at 0xF0). After a watchdog reset the bootloader then boots
+        the app straight back up, instead of holding the node in the
+        bootloader (a node that resets in flight should come back). A new
+        image that crashes before then is held, so it can be replaced over
+        CAN. Only the app init()s arm this; the bootloader's bare init()
+        must never mark itself as good.
+    */
+    static constexpr uint32_t FIRMWARE_OK_AFTER_MS = 30000;
+    bool     mark_firmware_ok_ = false;
+    bool     firmware_ok_marked_ = false;
+    void mark_firmware_ok();
 
     // Deferred parameter persistence (see the persist_on_set note on init())
     bool     persist_on_set_ = true;

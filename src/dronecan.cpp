@@ -25,6 +25,7 @@ static bool dronecan_can_init(DroneCAN::CanMode mode, uint8_t port)
 #endif
 }
 
+#ifndef DRONECAN_NO_IMAGE_CRC
 // Image extent from the STM32 startup code and linker scripts. It matches the
 // .bin byte for byte, so a host can check image_crc against the file.
 extern "C" const uint8_t g_pfnVectors[];
@@ -44,9 +45,13 @@ static const uint64_t crc64_we_nibble[16] = {
     0xDB55AACF12C73561ULL, 0x99A54B24BB2D03F2ULL,
     0x5EB4691841135847ULL, 0x1C4488F3E8F96ED4ULL,
 };
+#endif
 
 void DroneCAN::compute_image_crc()
 {
+#ifdef DRONECAN_NO_IMAGE_CRC
+    return; // trimmed out; reported only if the app sets image_crc
+#else
     if (this->image_crc != 0)
     {
         return; // set by the app
@@ -65,6 +70,7 @@ void DroneCAN::compute_image_crc()
         }
     }
     this->image_crc = ~crc;
+#endif
 }
 
 /*
@@ -85,6 +91,7 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
                   : DroneCAN_Storage::default_page();
     canfd_default_ = (mode != CanMode::Classic);
     persist_on_set_ = persist_on_set;
+    mark_firmware_ok_ = true;
     dronecan_can_init(mode, (uint8_t)port);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
@@ -166,6 +173,7 @@ void DroneCAN::init(const std::vector<parameter> &param_list,
                   : DroneCAN_Storage::default_page();
     canfd_default_ = (mode != CanMode::Classic);
     persist_on_set_ = persist_on_set;
+    mark_firmware_ok_ = true;
     dronecan_can_init(mode, (uint8_t)port);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
@@ -279,6 +287,10 @@ void DroneCAN::cycle()
     {
         this->looptime = millis();
         this->process1HzTasks(this->micros64());
+        if (mark_firmware_ok_ && !firmware_ok_marked_ && now > FIRMWARE_OK_AFTER_MS)
+        {
+            mark_firmware_ok();
+        }
         if (cycle_led_pin >= 0)
         {
             digitalWrite(cycle_led_pin, this->led_state);
@@ -291,6 +303,24 @@ void DroneCAN::cycle()
 
     // Write out any coalesced parameter changes once the burst has settled
     this->service_parameter_persist();
+}
+
+/*
+    Write ArduPilot's RTC_BOOT_FWOK value into BOOTCOM's spare word at 0xF0,
+    which BR_bootloader reads (and clears) on every boot. AP_Periph uses RTC
+    backup register 0 for this; RAM is kept across a watchdog reset, needs no
+    backup-domain set-up, and the region is reserved in every app's linker
+    script. A full, aligned 64-bit write, then commit_bootcom_writes() for the
+    H7's ECC.
+*/
+static void commit_bootcom_writes();
+
+void DroneCAN::mark_firmware_ok()
+{
+    static constexpr uint64_t RTC_BOOT_FWOK = 0xb0093a26u;
+    *(volatile uint64_t *)(0x20000000u + 0xF0u) = RTC_BOOT_FWOK;
+    commit_bootcom_writes();
+    firmware_ok_marked_ = true;
 }
 
 /*
@@ -310,6 +340,10 @@ void DroneCAN::mark_parameters_dirty()
 */
 bool DroneCAN::flush_parameters()
 {
+#ifdef DRONECAN_NO_PARAMETER_STORAGE
+    params_dirty_ = false; // RAM-only parameters: nothing to write
+    return true;
+#else
     if (!params_dirty_)
     {
         return true;
@@ -332,6 +366,7 @@ bool DroneCAN::flush_parameters()
         Serial.println("Storage: parameter flush failed");
     }
     return ok;
+#endif
 }
 
 /*
@@ -734,6 +769,9 @@ void DroneCAN::handle_RestartNode(CanardRxTransfer *transfer)
 */
 void DroneCAN::read_parameter_memory()
 {
+#ifdef DRONECAN_NO_PARAMETER_STORAGE
+    // RAM-only parameters: the code defaults stand
+#else
     // Build a flat array of current values so the storage layer can fill it in.
     // If storage has no valid data the array (and thus our defaults) stays untouched.
     std::vector<float> values(parameters.size());
@@ -763,6 +801,7 @@ void DroneCAN::read_parameter_memory()
             if (Serial) Serial.println("Storage: failed to write parameter defaults");
         }
     }
+#endif
 }
 
 /*
@@ -847,11 +886,13 @@ void DroneCAN::setParameterByIndex(size_t idx, float value)
     // caller asked for this write explicitly: persist immediately rather
     // than going through the coalescing delay used for CAN param writes.
     parameters[idx].value = value;
+#ifndef DRONECAN_NO_PARAMETER_STORAGE
     if (!DroneCAN_Storage::save(idx, value, parameters.size(), storage_page_,
                                 storage_instance(), parameter_signature()))
     {
         if (Serial) Serial.println("Storage: parameter save failed");
     }
+#endif
 }
 
 /*
@@ -1042,6 +1083,27 @@ void DroneCAN::request_DNA()
     Note that you cannot rely on the form of the filename. The client
     may hash the filename before sending
  */
+
+/*
+    Make sure every write to BOOTCOM has reached RAM before the reset.
+
+    On STM32H7, BOOTCOM is in DTCM, which has ECC. A write narrower than an
+    ECC word is held in a buffer and only completed by the next write to the
+    same RAM, and a reset discards it. The app keeps its own data in AXI SRAM,
+    so nothing else writes DTCM between filling BOOTCOM and NVIC_SystemReset():
+    the last bytes written (the end of the path) were lost, and the bootloader
+    read a truncated path. A full-width, aligned write to a spare word at the
+    end of the 256-byte BOOTCOM region commits whatever is buffered without
+    leaving anything new pending. Harmless where there's no ECC (L4).
+*/
+static void commit_bootcom_writes()
+{
+    volatile uint64_t *spare = (volatile uint64_t *)(0x20000000u + 0x100u - sizeof(uint64_t));
+    *spare = 0;
+    (void)*spare;
+    __DSB();
+}
+
 void DroneCAN::handle_begin_firmware_update(CanardRxTransfer *transfer)
 {
     if (Serial) Serial.println("Update request received");
@@ -1067,6 +1129,7 @@ void DroneCAN::handle_begin_firmware_update(CanardRxTransfer *transfer)
     }
     memcpy(comms->path, req.image_file_remote_path.path.data, req.image_file_remote_path.path.len);
     comms->my_node_id = canardGetLocalNodeID(&canard);
+    commit_bootcom_writes();
 
     uint8_t buffer[UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE_RESPONSE_MAX_SIZE];
     uavcan_protocol_file_BeginFirmwareUpdateResponse reply{};
