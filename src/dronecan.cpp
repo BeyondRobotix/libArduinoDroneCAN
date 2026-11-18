@@ -25,6 +25,7 @@ static bool dronecan_can_init(DroneCAN::CanMode mode, uint8_t port)
 #endif
 }
 
+#ifndef DRONECAN_NO_IMAGE_CRC
 // Image extent from the STM32 startup code and linker scripts. It matches the
 // .bin byte for byte, so a host can check image_crc against the file.
 extern "C" const uint8_t g_pfnVectors[];
@@ -44,9 +45,13 @@ static const uint64_t crc64_we_nibble[16] = {
     0xDB55AACF12C73561ULL, 0x99A54B24BB2D03F2ULL,
     0x5EB4691841135847ULL, 0x1C4488F3E8F96ED4ULL,
 };
+#endif
 
 void DroneCAN::compute_image_crc()
 {
+#ifdef DRONECAN_NO_IMAGE_CRC
+    return; // trimmed out; reported only if the app sets image_crc
+#else
     if (this->image_crc != 0)
     {
         return; // set by the app
@@ -65,6 +70,7 @@ void DroneCAN::compute_image_crc()
         }
     }
     this->image_crc = ~crc;
+#endif
 }
 
 /*
@@ -310,6 +316,10 @@ void DroneCAN::mark_parameters_dirty()
 */
 bool DroneCAN::flush_parameters()
 {
+#ifdef DRONECAN_NO_PARAMETER_STORAGE
+    params_dirty_ = false; // RAM-only parameters: nothing to write
+    return true;
+#else
     if (!params_dirty_)
     {
         return true;
@@ -332,6 +342,7 @@ bool DroneCAN::flush_parameters()
         Serial.println("Storage: parameter flush failed");
     }
     return ok;
+#endif
 }
 
 /*
@@ -734,6 +745,9 @@ void DroneCAN::handle_RestartNode(CanardRxTransfer *transfer)
 */
 void DroneCAN::read_parameter_memory()
 {
+#ifdef DRONECAN_NO_PARAMETER_STORAGE
+    // RAM-only parameters: the code defaults stand
+#else
     // Build a flat array of current values so the storage layer can fill it in.
     // If storage has no valid data the array (and thus our defaults) stays untouched.
     std::vector<float> values(parameters.size());
@@ -763,6 +777,7 @@ void DroneCAN::read_parameter_memory()
             if (Serial) Serial.println("Storage: failed to write parameter defaults");
         }
     }
+#endif
 }
 
 /*
@@ -847,11 +862,13 @@ void DroneCAN::setParameterByIndex(size_t idx, float value)
     // caller asked for this write explicitly: persist immediately rather
     // than going through the coalescing delay used for CAN param writes.
     parameters[idx].value = value;
+#ifndef DRONECAN_NO_PARAMETER_STORAGE
     if (!DroneCAN_Storage::save(idx, value, parameters.size(), storage_page_,
                                 storage_instance(), parameter_signature()))
     {
         if (Serial) Serial.println("Storage: parameter save failed");
     }
+#endif
 }
 
 /*
